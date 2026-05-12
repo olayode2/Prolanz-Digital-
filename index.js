@@ -3,8 +3,6 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
-  jidDecode,
   proto,
   getContentType,
 } = require("@whiskeysockets/baileys");
@@ -30,10 +28,7 @@ app.use(express.json());
 let sock = null;
 let isConnected = false;
 
-// In-memory store for message history (optional but useful)
-const store = makeInMemoryStore({
-  logger: pino({ level: "silent" }),
-});
+
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
@@ -41,20 +36,11 @@ async function connectToWhatsApp() {
 
   sock = makeWASocket({
     version,
-    logger: pino({ level: "silent" }), // keep logs clean
-    printQRInTerminal: true,           // QR code shows in Railway logs
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: true,
     auth: state,
     browser: ["LeadQualBot", "Chrome", "1.0.0"],
-    getMessage: async (key) => {
-      if (store) {
-        const msg = await store.loadMessage(key.remoteJid, key.id);
-        return msg?.message || undefined;
-      }
-      return proto.Message.fromObject({});
-    },
   });
-
-  store?.bind(sock.ev);
 
   // ── Save credentials whenever they update ──
   sock.ev.on("creds.update", saveCreds);
