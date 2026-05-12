@@ -14,6 +14,7 @@ const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode");
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
@@ -27,6 +28,7 @@ app.use(express.json());
 
 let sock = null;
 let isConnected = false;
+let currentQR = null;
 
 
 
@@ -50,7 +52,8 @@ async function connectToWhatsApp() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log("⚡ Scan this QR code in WhatsApp:");
+      currentQR = qr;
+      console.log("⚡ Scan QR code at /qr endpoint or in terminal:");
       qrcode.generate(qr, { small: true });
     }
 
@@ -88,6 +91,7 @@ async function connectToWhatsApp() {
       }
     } else if (connection === "open") {
       isConnected = true;
+      currentQR = null;
       console.log("✅ WhatsApp connected successfully!");
     }
   });
@@ -150,6 +154,32 @@ app.get("/", (req, res) => {
     status: isConnected ? "connected" : "disconnected",
     message: isConnected ? "WhatsApp bot is running ✅" : "Bot not connected yet",
   });
+});
+
+// QR code page — open in browser to scan
+app.get("/qr", async (req, res) => {
+  if (isConnected) {
+    return res.send("<h2>✅ WhatsApp is already connected! No QR needed.</h2>");
+  }
+  if (!currentQR) {
+    return res.send("<h2>⏳ QR code not ready yet. Wait 10 seconds and refresh.</h2>");
+  }
+  try {
+    const qrImage = await QRCode.toDataURL(currentQR);
+    res.send(`
+      <html>
+        <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#111;color:#fff;">
+          <h2>📱 Scan with WhatsApp</h2>
+          <p>Open WhatsApp → Linked Devices → Link a Device</p>
+          <img src="${qrImage}" style="width:300px;height:300px;" />
+          <p style="margin-top:20px;color:#aaa;">Page auto-refreshes every 30 seconds</p>
+          <script>setTimeout(() => location.reload(), 30000)</script>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    res.status(500).send("Error generating QR code");
+  }
 });
 
 // Send a message — called by n8n HTTP Request node
