@@ -203,7 +203,7 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    const jid = to.includes("@s.whatsapp.net") ? to : `${to}@s.whatsapp.net`;
+   const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
     await sock.sendMessage(jid, { text: message });
     console.log(`📤 Sent to ${to}: ${message}`);
     res.json({ success: true });
