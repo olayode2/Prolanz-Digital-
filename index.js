@@ -1,6 +1,5 @@
 const {
   default: makeWASocket,
-  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   proto,
@@ -11,17 +10,22 @@ const express = require("express");
 const axios = require("axios");
 const pino = require("pino");
 const { Boom } = require("@hapi/boom");
-const fs = require("fs");
-const path = require("path");
 const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
+const { Pool } = require("pg");
+const { usePostgresAuthState } = require("./auth-state-pg");
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL; // your n8n webhook URL
-const API_SECRET = process.env.API_SECRET || "changeme"; // secret to protect your /send endpoint
-const AUTH_FOLDER = "./auth_info"; // session files stored here
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
+const API_SECRET = process.env.API_SECRET || "changeme";
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Postgres pool — created once, persists across reconnects
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
 const app = express();
 app.use(express.json());
@@ -30,10 +34,18 @@ let sock = null;
 let isConnected = false;
 let currentQR = null;
 
-
+// Wipe stored auth (used when WhatsApp logs us out or session is bad)
+async function clearAuth() {
+  try {
+    await pool.query("DELETE FROM baileys_auth");
+    console.log("🗑️  Cleared Postgres auth state");
+  } catch (err) {
+    console.error("❌ Failed to clear auth:", err.message);
+  }
+}
 
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+  const { state, saveCreds } = await usePostgresAuthState(pool);
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
@@ -62,10 +74,9 @@ async function connectToWhatsApp() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.log("❌ Connection closed. Reason:", reason);
 
-      // Auto-reconnect logic
       if (reason === DisconnectReason.badSession) {
-        console.log("Bad session — deleting auth and restarting...");
-        fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+        console.log("Bad session — clearing auth and restarting...");
+        await clearAuth();
         connectToWhatsApp();
       } else if (reason === DisconnectReason.connectionClosed) {
         console.log("Connection closed — reconnecting...");
@@ -76,8 +87,8 @@ async function connectToWhatsApp() {
       } else if (reason === DisconnectReason.connectionReplaced) {
         console.log("Connection replaced — another session opened.");
       } else if (reason === DisconnectReason.loggedOut) {
-        console.log("Logged out — deleting session and restarting...");
-        fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+        console.log("Logged out — clearing auth and restarting...");
+        await clearAuth();
         connectToWhatsApp();
       } else if (reason === DisconnectReason.restartRequired) {
         console.log("Restart required — reconnecting...");
@@ -101,7 +112,6 @@ async function connectToWhatsApp() {
     if (type !== "notify") return;
 
     for (const msg of messages) {
-      // Ignore status broadcasts and your own messages
       if (msg.key.remoteJid === "status@broadcast") continue;
       if (msg.key.fromMe) continue;
 
@@ -109,10 +119,8 @@ async function connectToWhatsApp() {
       const senderNumber = from.replace("@s.whatsapp.net", "");
       const isGroup = from.endsWith("@g.us");
 
-      // Ignore group messages (only handle 1-on-1 for lead qualification)
       if (isGroup) continue;
 
-      // Extract message text
       const messageType = getContentType(msg.message);
       let text = "";
 
@@ -121,13 +129,11 @@ async function connectToWhatsApp() {
       } else if (messageType === "extendedTextMessage") {
         text = msg.message.extendedTextMessage.text;
       } else {
-        // Non-text message received — optionally notify n8n
         text = `[${messageType}]`;
       }
 
       console.log(`📩 Message from ${senderNumber}: ${text}`);
 
-      // Forward to n8n
       if (N8N_WEBHOOK_URL) {
         try {
           await axios.post(N8N_WEBHOOK_URL, {
@@ -148,7 +154,6 @@ async function connectToWhatsApp() {
 
 // ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
 
-// Health check
 app.get("/", (req, res) => {
   res.json({
     status: isConnected ? "connected" : "disconnected",
@@ -156,7 +161,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// QR code page — open in browser to scan
 app.get("/qr", async (req, res) => {
   if (isConnected) {
     return res.send("<h2>✅ WhatsApp is already connected! No QR needed.</h2>");
@@ -182,9 +186,7 @@ app.get("/qr", async (req, res) => {
   }
 });
 
-// Send a message — called by n8n HTTP Request node
 app.post("/send", async (req, res) => {
-  // Simple secret check
   const secret = req.headers["x-api-secret"];
   if (secret !== API_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
@@ -201,7 +203,6 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    // Format number to WhatsApp JID
     const jid = to.includes("@s.whatsapp.net") ? to : `${to}@s.whatsapp.net`;
     await sock.sendMessage(jid, { text: message });
     console.log(`📤 Sent to ${to}: ${message}`);
