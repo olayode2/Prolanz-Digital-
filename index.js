@@ -100,11 +100,24 @@ async function connectToWhatsApp() {
         console.log("Unknown disconnect reason — reconnecting...");
         connectToWhatsApp();
       }
-    } else if (connection === "open") {
-      isConnected = true;
-      currentQR = null;
-      console.log("✅ WhatsApp connected successfully!");
+ } else if (connection === "open") {
+  isConnected = true;
+  currentQR = null;
+  console.log("✅ WhatsApp connected successfully!");
+
+  // Print groups on connect so we can grab JIDs from logs
+  try {
+    const groups = await sock.groupFetchAllParticipating();
+    console.log("\n📋 Groups the bot is in:");
+    for (const groupId in groups) {
+      const g = groups[groupId];
+      console.log(`   ${g.subject}  →  ${g.id}`);
     }
+    console.log("");
+  } catch (err) {
+    console.error("❌ Failed to fetch groups:", err.message);
+  }
+}
   });
 
   // ── Incoming message handler ──
@@ -121,16 +134,18 @@ async function connectToWhatsApp() {
 
       if (isGroup) continue;
 
-      const messageType = getContentType(msg.message);
-      let text = "";
+     const messageType = getContentType(msg.message);
+let text = "";
 
-      if (messageType === "conversation") {
-        text = msg.message.conversation;
-      } else if (messageType === "extendedTextMessage") {
-        text = msg.message.extendedTextMessage.text;
-      } else {
-        text = `[${messageType}]`;
-      }
+// Only process text messages; ignore reactions, images, voice notes, stickers etc.
+if (messageType === "conversation") {
+  text = msg.message.conversation;
+} else if (messageType === "extendedTextMessage") {
+  text = msg.message.extendedTextMessage.text;
+} else {
+  console.log(`📦 Ignoring non-text message (${messageType}) from ${senderNumber}`);
+  continue;
+}
 
       console.log(`📩 Message from ${senderNumber}: ${text}`);
 
