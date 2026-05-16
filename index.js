@@ -121,60 +121,123 @@ async function connectToWhatsApp() {
   });
 
   // ── Incoming message handler ──
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
+  // Holds messages briefly before forwarding, so edits can replace them
+const pendingMessages = new Map();
+const DEBOUNCE_MS = 7000;
 
-    for (const msg of messages) {
-      if (msg.key.remoteJid === "status@broadcast") continue;
-      if (msg.key.fromMe) continue;
-
-      const from = msg.key.remoteJid;
-      const senderNumber = from.replace("@s.whatsapp.net", "");
-      const isGroup = from.endsWith("@g.us");
-
-      if (isGroup) continue;
-
-     const messageType = getContentType(msg.message);
-let text = "";
-
-// Only process text messages; ignore reactions, images, voice notes, stickers etc.
-if (messageType === "conversation") {
-  text = msg.message.conversation;
-} else if (messageType === "extendedTextMessage") {
-  text = msg.message.extendedTextMessage.text;
-} else {
-  console.log(`📦 Ignoring non-text message (${messageType}) from ${senderNumber}`);
-  continue;
+async function forwardToN8n(jid, senderNumber, text, originalMsg) {
+  if (!N8N_WEBHOOK_URL) return;
+  try {
+    await axios.post(N8N_WEBHOOK_URL, {
+      from: senderNumber,
+      jid: jid,
+      message: text,
+      timestamp: originalMsg.messageTimestamp,
+      messageId: originalMsg.key.id,
+    });
+    console.log(`✅ Forwarded to n8n: ${text}`);
+  } catch (err) {
+    console.error("❌ Failed to forward to n8n:", err.message);
+  }
 }
 
-     console.log(`📩 Message from ${senderNumber}: ${text}`);
+sock.ev.on("messages.upsert", async ({ messages, type }) => {
+  if (type !== "notify") return;
 
-// Mark as read (blue ticks) and show "typing..." while n8n processes
-try {
-  await sock.readMessages([msg.key]);
-  await sock.sendPresenceUpdate('composing', from);
-} catch (err) {
-  console.error("Presence/read failed:", err.message);
-}
+  for (const msg of messages) {
+    if (msg.key.remoteJid === "status@broadcast") continue;
+    if (msg.key.fromMe) continue;
 
-if (N8N_WEBHOOK_URL) {
-        try {
-          await axios.post(N8N_WEBHOOK_URL, {
-            from: senderNumber,
-            jid: from,
-            message: text,
-            timestamp: msg.messageTimestamp,
-            messageId: msg.key.id,
-          });
-          console.log(`✅ Forwarded to n8n`);
-        } catch (err) {
-          console.error("❌ Failed to forward to n8n:", err.message);
+    const from = msg.key.remoteJid;
+    const senderNumber = from.replace("@s.whatsapp.net", "").replace("@lid", "");
+    const isGroup = from.endsWith("@g.us");
+
+    if (isGroup) continue;
+
+    const messageType = getContentType(msg.message);
+
+    // Handle message edits (WhatsApp lets users edit within 15 min)
+    if (messageType === "protocolMessage" && msg.message.protocolMessage?.type === 14) {
+      const editedContent = msg.message.protocolMessage.editedMessage;
+      let editedText = "";
+      if (editedContent?.conversation) {
+        editedText = editedContent.conversation;
+      } else if (editedContent?.extendedTextMessage?.text) {
+        editedText = editedContent.extendedTextMessage.text;
+      }
+
+      if (editedText) {
+        console.log(`✏️ Edit from ${senderNumber}: ${editedText}`);
+
+        const pending = pendingMessages.get(from);
+        if (pending) {
+          // Edit caught during debounce window, replace the pending text
+          console.log(`🔄 Replacing pending message with edit`);
+          clearTimeout(pending.timer);
+          pending.text = editedText;
+          pending.timer = setTimeout(async () => {
+            await forwardToN8n(from, senderNumber, pending.text, msg);
+            pendingMessages.delete(from);
+          }, DEBOUNCE_MS);
+          pendingMessages.set(from, pending);
+        } else {
+          // Edit arrived too late, original already forwarded
+          console.log(`⚠️ Late edit, forwarding as correction note`);
+          try {
+            await sock.sendPresenceUpdate('composing', from);
+          } catch (err) {}
+          await forwardToN8n(
+            from,
+            senderNumber,
+            `[CORRECTION FROM LEAD: My previous message should actually be "${editedText}". Please use this corrected version.]`,
+            msg
+          );
         }
       }
+      continue;
     }
-  });
-}
 
+    // Normal text messages
+    let text = "";
+    if (messageType === "conversation") {
+      text = msg.message.conversation;
+    } else if (messageType === "extendedTextMessage") {
+      text = msg.message.extendedTextMessage.text;
+    } else {
+      console.log(`📦 Ignoring non-text message (${messageType}) from ${senderNumber}`);
+      continue;
+    }
+
+    console.log(`📩 Message from ${senderNumber}: ${text}`);
+
+    // Mark as read (blue ticks) and show "typing..." while we wait
+    try {
+      await sock.readMessages([msg.key]);
+      await sock.sendPresenceUpdate('composing', from);
+    } catch (err) {
+      console.error("Presence/read failed:", err.message);
+    }
+
+    // If user sends multiple messages quickly, combine them
+    const existingPending = pendingMessages.get(from);
+    if (existingPending) {
+      clearTimeout(existingPending.timer);
+      text = existingPending.text + "\n" + text;
+    }
+
+    // Debounce: wait 3 seconds before forwarding, so quick edits can replace the message
+    const timer = setTimeout(async () => {
+      await forwardToN8n(from, senderNumber, text, msg);
+      pendingMessages.delete(from);
+    }, DEBOUNCE_MS);
+
+    pendingMessages.set(from, {
+      text,
+      timer,
+      msgKey: msg.key
+    });
+  }
+});
 // ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
 
 app.get("/", (req, res) => {
