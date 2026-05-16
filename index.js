@@ -147,9 +147,17 @@ if (messageType === "conversation") {
   continue;
 }
 
-      console.log(`📩 Message from ${senderNumber}: ${text}`);
+     console.log(`📩 Message from ${senderNumber}: ${text}`);
 
-      if (N8N_WEBHOOK_URL) {
+// Mark as read (blue ticks) and show "typing..." while n8n processes
+try {
+  await sock.readMessages([msg.key]);
+  await sock.sendPresenceUpdate('composing', from);
+} catch (err) {
+  console.error("Presence/read failed:", err.message);
+}
+
+if (N8N_WEBHOOK_URL) {
         try {
           await axios.post(N8N_WEBHOOK_URL, {
             from: senderNumber,
@@ -219,7 +227,9 @@ app.post("/send", async (req, res) => {
 
   try {
    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
-    await sock.sendMessage(jid, { text: message });
+    // Clear typing indicator before sending
+await sock.sendPresenceUpdate('paused', jid);
+await sock.sendMessage(jid, { text: message });
     console.log(`📤 Sent to ${to}: ${message}`);
     res.json({ success: true });
   } catch (err) {
