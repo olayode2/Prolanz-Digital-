@@ -219,7 +219,7 @@ app.post("/send", async (req, res) => {
     return res.status(503).json({ error: "WhatsApp not connected yet" });
   }
 
-  const { to, message } = req.body;
+  const { to, message, mentions } = req.body;
 
   if (!to || !message) {
     return res.status(400).json({ error: "Missing 'to' or 'message' in body" });
@@ -229,7 +229,13 @@ app.post("/send", async (req, res) => {
    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
     // Clear typing indicator before sending
 await sock.sendPresenceUpdate('paused', jid);
-await sock.sendMessage(jid, { text: message });
+
+const messageOptions = { text: message };
+if (mentions && Array.isArray(mentions) && mentions.length > 0) {
+  messageOptions.mentions = mentions;
+}
+
+await sock.sendMessage(jid, messageOptions);
     console.log(`📤 Sent to ${to}: ${message}`);
     res.json({ success: true });
   } catch (err) {
