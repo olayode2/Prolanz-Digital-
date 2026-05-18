@@ -277,23 +277,31 @@ app.post("/send", async (req, res) => {
     return res.status(503).json({ error: "WhatsApp not connected yet" });
   }
 
-  const { to, message, mentions } = req.body;
+  const { to, message, mentions, imageUrl } = req.body;
 
-  if (!to || !message) {
-    return res.status(400).json({ error: "Missing 'to' or 'message' in body" });
-  }
-
-  try {
-   const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
-    // Clear typing indicator before sending
-await sock.sendPresenceUpdate('paused', jid);
-
-const messageOptions = { text: message };
-if (mentions && Array.isArray(mentions) && mentions.length > 0) {
-  messageOptions.mentions = mentions;
+if (!to || !message) {
+  return res.status(400).json({ error: "Missing 'to' or 'message' in body" });
 }
 
-await sock.sendMessage(jid, messageOptions);
+try {
+  const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+  await sock.sendPresenceUpdate('paused', jid);
+
+  let messageOptions;
+  if (imageUrl) {
+    messageOptions = {
+      image: { url: imageUrl },
+      caption: message
+    };
+  } else {
+    messageOptions = { text: message };
+  }
+
+  if (mentions && Array.isArray(mentions) && mentions.length > 0) {
+    messageOptions.mentions = mentions;
+  }
+
+  await sock.sendMessage(jid, messageOptions);
     console.log(`📤 Sent to ${to}: ${message}`);
     res.json({ success: true });
   } catch (err) {
