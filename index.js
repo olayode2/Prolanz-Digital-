@@ -123,7 +123,7 @@ async function connectToWhatsApp() {
   // ── Incoming message handler ──
   // Holds messages briefly before forwarding, so edits can replace them
 const pendingMessages = new Map();
-const DEBOUNCE_MS = 3000;
+const DEBOUNCE_MS = 7000;
 
 async function forwardToN8n(jid, senderNumber, text, originalMsg) {
   if (!N8N_WEBHOOK_URL) return;
@@ -220,10 +220,7 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
       text = existingPending.text + "\n" + text;
     }
 
-    const timer = setTimeout(async () => {
-      await forwardToN8n(from, senderNumber, text, msg);
-      pendingMessages.delete(from);
-    },const timer = setTimeout(async () => {
+   const timer = setTimeout(async () => {
       await forwardToN8n(from, senderNumber, text, msg);
       pendingMessages.delete(from);
     }, DEBOUNCE_MS);
