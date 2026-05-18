@@ -123,7 +123,7 @@ async function connectToWhatsApp() {
   // ── Incoming message handler ──
   // Holds messages briefly before forwarding, so edits can replace them
 const pendingMessages = new Map();
-const DEBOUNCE_MS = 7000;
+const DEBOUNCE_MS = 3000;
 
 async function forwardToN8n(jid, senderNumber, text, originalMsg) {
   if (!N8N_WEBHOOK_URL) return;
@@ -171,7 +171,6 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
 
         const pending = pendingMessages.get(from);
         if (pending) {
-          // Edit caught during debounce window, replace the pending text
           console.log(`🔄 Replacing pending message with edit`);
           clearTimeout(pending.timer);
           pending.text = editedText;
@@ -181,7 +180,6 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
           }, DEBOUNCE_MS);
           pendingMessages.set(from, pending);
         } else {
-          // Edit arrived too late, original already forwarded
           console.log(`⚠️ Late edit, forwarding as correction note`);
           try {
             await sock.sendPresenceUpdate('composing', from);
@@ -197,7 +195,6 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
       continue;
     }
 
-    // Normal text messages
     let text = "";
     if (messageType === "conversation") {
       text = msg.message.conversation;
@@ -210,7 +207,6 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
 
     console.log(`📩 Message from ${senderNumber}: ${text}`);
 
-    // Mark as read (blue ticks) and show "typing..." while we wait
     try {
       await sock.readMessages([msg.key]);
       await sock.sendPresenceUpdate('composing', from);
@@ -218,15 +214,16 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
       console.error("Presence/read failed:", err.message);
     }
 
-    // If user sends multiple messages quickly, combine them
     const existingPending = pendingMessages.get(from);
     if (existingPending) {
       clearTimeout(existingPending.timer);
       text = existingPending.text + "\n" + text;
     }
 
-    // Debounce: wait 3 seconds before forwarding, so quick edits can replace the message
     const timer = setTimeout(async () => {
+      await forwardToN8n(from, senderNumber, text, msg);
+      pendingMessages.delete(from);
+    },const timer = setTimeout(async () => {
       await forwardToN8n(from, senderNumber, text, msg);
       pendingMessages.delete(from);
     }, DEBOUNCE_MS);
@@ -238,6 +235,7 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
     });
   }
 });
+}
 // ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
 
 app.get("/", (req, res) => {
