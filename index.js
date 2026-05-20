@@ -170,6 +170,7 @@ async function connectToWhatsApp() {
   // ── Forward payload to n8n ──
   // Now accepts an extraPayload object to merge in media fields
   async function forwardToN8n(jid, senderNumber, text, originalMsg, extraPayload = {}) {
+    console.log('📤 Payload being sent:', JSON.stringify({ text, ...extraPayload }));
     if (!N8N_WEBHOOK_URL) return;
     try {
       const payload = {
