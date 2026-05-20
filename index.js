@@ -33,7 +33,8 @@ app.use(express.json());
 let sock = null;
 let isConnected = false;
 let currentQR = null;
-
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 // Wipe stored auth (used when WhatsApp logs us out or session is bad)
 async function clearAuth() {
   try {
@@ -68,40 +69,34 @@ async function connectToWhatsApp() {
       qrcode.generate(qr, { small: true });
     }
 
-    if (connection === "close") {
-      isConnected = false;
-      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      console.log("❌ Connection closed. Reason:", reason);
+if (connection === "close") {
+  isConnected = false;
+  const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+  console.log("❌ Connection closed. Reason:", reason);
 
-      if (reason === DisconnectReason.badSession) {
-        console.log("Bad session — clearing auth and restarting...");
-        await clearAuth();
-        connectToWhatsApp();
-      } else if (reason === DisconnectReason.connectionClosed) {
-        console.log("Connection closed — reconnecting...");
-        connectToWhatsApp();
-      } else if (reason === DisconnectReason.connectionLost) {
-        console.log("Connection lost — reconnecting...");
-        connectToWhatsApp();
-      } else if (reason === DisconnectReason.connectionReplaced) {
-        console.log("Connection replaced — another session opened.");
-      } else if (reason === DisconnectReason.loggedOut) {
-        console.log("Logged out — clearing auth and restarting...");
-        await clearAuth();
-        connectToWhatsApp();
-      } else if (reason === DisconnectReason.restartRequired) {
-        console.log("Restart required — reconnecting...");
-        connectToWhatsApp();
-      } else if (reason === DisconnectReason.timedOut) {
-        console.log("Timed out — reconnecting...");
-        connectToWhatsApp();
-      } else {
-        console.log("Unknown disconnect reason — reconnecting...");
-        connectToWhatsApp();
-      }
+  if (reason === DisconnectReason.loggedOut) {
+    console.log("Logged out by user — clearing auth, will need fresh QR scan...");
+    await clearAuth();
+    reconnectAttempts = 0;
+    connectToWhatsApp();
+  } else {
+    reconnectAttempts++;
+    const delay = Math.min(2000 * reconnectAttempts, 30000);
+
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      console.log(`❌ Failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts. Wiping auth as last resort.`);
+      await clearAuth();
+      reconnectAttempts = 0;
+      setTimeout(() => connectToWhatsApp(), 2000);
+    } else {
+      console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) without wiping auth...`);
+      setTimeout(() => connectToWhatsApp(), delay);
+    }
+  }
  } else if (connection === "open") {
   isConnected = true;
   currentQR = null;
+  reconnectAttempts = 0;
   console.log("✅ WhatsApp connected successfully!");
 
   // Print groups on connect so we can grab JIDs from logs
