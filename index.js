@@ -93,6 +93,91 @@ async function markMessageProcessed(messageId) {
   }
 }
 
+// ─── PER-LEAD PROCESSING LOCK + QUEUE ──────────────────────────────────────────
+// Prevents premature replies: while n8n is busy processing a lead's turn, any
+// further messages from that SAME lead are held in a queue and forwarded together
+// once the reply is sent (signalled by /send), instead of triggering separate,
+// out-of-sync responses. A safety timeout auto-releases a stuck lock after 30s.
+const processingLocks = new Set();   // JIDs currently being processed by n8n
+const messageQueues = new Map();     // JID -> queued payload waiting for the lock
+const LOCK_TIMEOUT_MS = 30000;       // safety: force-release a stuck lock after 30s
+
+// Post a payload to n8n (self-contained; callable from anywhere, no sock needed)
+async function sendToN8n(payload) {
+  console.log("📤 Payload to n8n:", JSON.stringify({ message: payload.message, type: payload.messageType }));
+  if (!N8N_WEBHOOK_URL) return;
+  try {
+    await axios.post(N8N_WEBHOOK_URL, payload);
+    console.log(`✅ Forwarded to n8n [${payload.messageType}]: ${payload.message}`);
+  } catch (err) {
+    console.error("❌ Failed to forward to n8n:", err.message);
+  }
+}
+
+// Lock a lead and forward their payload, with a safety auto-release
+function lockAndSend(payload) {
+  const jid = payload.jid;
+  processingLocks.add(jid);
+  console.log(`🔒 Locked ${jid}`);
+  setTimeout(() => {
+    if (processingLocks.has(jid)) {
+      console.log(`⏱️ Lock timeout for ${jid} — force-releasing`);
+      releaseLock(jid);
+    }
+  }, LOCK_TIMEOUT_MS);
+  sendToN8n(payload);
+}
+
+// Queue a message for a lead that's currently locked (combine if one already waits)
+function queueForLead(payload) {
+  const jid = payload.jid;
+  const existing = messageQueues.get(jid);
+  if (existing) {
+    existing.message = existing.message + "\n" + payload.message;
+    existing.timestamp = payload.timestamp;
+    existing.messageId = payload.messageId;
+    // if the newest message carries media, keep it
+    if (payload.messageType && payload.messageType !== "text") {
+      existing.messageType = payload.messageType;
+      if (payload.audio) existing.audio = payload.audio;
+      if (payload.image) existing.image = payload.image;
+    }
+    console.log(`📥 Combined into existing queue for ${jid}`);
+  } else {
+    messageQueues.set(jid, payload);
+    console.log(`📥 Queued for locked lead ${jid}`);
+  }
+}
+
+// Release a lead's lock; if messages queued up while locked, forward them together
+function releaseLock(jid) {
+  processingLocks.delete(jid);
+  const queued = messageQueues.get(jid);
+  if (queued) {
+    messageQueues.delete(jid);
+    console.log(`🔓 Released ${jid} — forwarding queued message(s)`);
+    lockAndSend(queued);
+  } else {
+    console.log(`🔓 Released ${jid}`);
+  }
+}
+
+// Release using the recipient string from /send (tolerates JID-format differences)
+function releaseLeadLock(to) {
+  const direct = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+  if (processingLocks.has(direct) || messageQueues.has(direct)) {
+    return releaseLock(direct);
+  }
+  const num = to.replace(/@.*$/, "");
+  for (const jid of processingLocks) {
+    if (jid.replace(/@.*$/, "") === num) return releaseLock(jid);
+  }
+  for (const jid of messageQueues.keys()) {
+    if (jid.replace(/@.*$/, "") === num) return releaseLock(jid);
+  }
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 async function connectToWhatsApp() {
   const { state, saveCreds } = await usePostgresAuthState(pool);
   const { version } = await fetchLatestBaileysVersion();
@@ -385,7 +470,23 @@ async function connectToWhatsApp() {
       }
 
       const timer = setTimeout(async () => {
-        await forwardToN8n(from, senderNumber, text, msg, extraPayload);
+        // Build the same payload shape forwardToN8n used
+        const payload = {
+          from: senderNumber,
+          jid: from,
+          message: text,
+          timestamp: msg.messageTimestamp,
+          messageId: msg.key.id,
+          messageType: "text",
+          ...extraPayload,
+        };
+        if (processingLocks.has(from)) {
+          // Bot is still processing this lead's previous turn — hold this one
+          queueForLead(payload);
+        } else {
+          // Lead is free — lock and forward
+          lockAndSend(payload);
+        }
         pendingMessages.delete(from);
       }, DEBOUNCE_MS);
 
@@ -477,6 +578,9 @@ app.post("/send", async (req, res) => {
 
     await sock.sendMessage(jid, messageOptions);
     console.log(`📤 Sent to ${to}: ${message}`);
+    // Reply delivered → release this lead's processing lock and flush any queued messages.
+    // (Group notifications target a group JID that's never locked, so this is a no-op for them.)
+    releaseLeadLock(to);
     res.json({ success: true });
   } catch (err) {
     console.error("❌ Failed to send message:", err.message);
