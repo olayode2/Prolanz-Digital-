@@ -4,6 +4,7 @@ const {
   fetchLatestBaileysVersion,
   proto,
   getContentType,
+  downloadMediaMessage, // ✅ Added for voice note + image support
 } = require("@whiskeysockets/baileys");
 
 const express = require("express");
@@ -35,6 +36,7 @@ let isConnected = false;
 let currentQR = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
+
 // Wipe stored auth (used when WhatsApp logs us out or session is bad)
 async function clearAuth() {
   try {
@@ -44,6 +46,7 @@ async function clearAuth() {
     console.error("❌ Failed to clear auth:", err.message);
   }
 }
+
 // Ensure the processed_messages table exists (for dedup)
 async function ensureProcessedTable() {
   try {
@@ -89,17 +92,18 @@ async function markMessageProcessed(messageId) {
     console.error("Failed to mark message processed:", err.message);
   }
 }
+
 async function connectToWhatsApp() {
   const { state, saveCreds } = await usePostgresAuthState(pool);
   const { version } = await fetchLatestBaileysVersion();
 
-sock = makeWASocket({
-  version,
-  logger: pino({ level: "silent" }),
-  auth: state,
-  browser: ["LeadQualBot", "Chrome", "1.0.0"],
-  syncFullHistory: true,
-});
+  sock = makeWASocket({
+    version,
+    logger: pino({ level: "silent" }),
+    auth: state,
+    browser: ["LeadQualBot", "Chrome", "1.0.0"],
+    syncFullHistory: true,
+  });
 
   // ── Save credentials whenever they update ──
   sock.ev.on("creds.update", saveCreds);
@@ -114,190 +118,307 @@ sock = makeWASocket({
       qrcode.generate(qr, { small: true });
     }
 
-if (connection === "close") {
-  isConnected = false;
-  const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-  console.log("❌ Connection closed. Reason:", reason);
+    if (connection === "close") {
+      isConnected = false;
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      console.log("❌ Connection closed. Reason:", reason);
 
-  if (reason === DisconnectReason.loggedOut) {
-    console.log("Logged out by user — clearing auth, will need fresh QR scan...");
-    await clearAuth();
-    reconnectAttempts = 0;
-    connectToWhatsApp();
-  } else {
-    reconnectAttempts++;
-    const delay = Math.min(2000 * reconnectAttempts, 30000);
+      if (reason === DisconnectReason.loggedOut) {
+        console.log("Logged out by user — clearing auth, will need fresh QR scan...");
+        await clearAuth();
+        reconnectAttempts = 0;
+        connectToWhatsApp();
+      } else {
+        reconnectAttempts++;
+        const delay = Math.min(2000 * reconnectAttempts, 30000);
 
-    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-      console.log(`❌ Failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts. Wiping auth as last resort.`);
-      await clearAuth();
+        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+          console.log(`❌ Failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts. Wiping auth as last resort.`);
+          await clearAuth();
+          reconnectAttempts = 0;
+          setTimeout(() => connectToWhatsApp(), 2000);
+        } else {
+          console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) without wiping auth...`);
+          setTimeout(() => connectToWhatsApp(), delay);
+        }
+      }
+    } else if (connection === "open") {
+      isConnected = true;
+      currentQR = null;
       reconnectAttempts = 0;
-      setTimeout(() => connectToWhatsApp(), 2000);
-    } else {
-      console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) without wiping auth...`);
-      setTimeout(() => connectToWhatsApp(), delay);
-    }
-  }
- } else if (connection === "open") {
-  isConnected = true;
-  currentQR = null;
-  reconnectAttempts = 0;
-  console.log("✅ WhatsApp connected successfully!");
+      console.log("✅ WhatsApp connected successfully!");
 
-  // Print groups on connect so we can grab JIDs from logs
-  try {
-    const groups = await sock.groupFetchAllParticipating();
-    console.log("\n📋 Groups the bot is in:");
-    for (const groupId in groups) {
-      const g = groups[groupId];
-      console.log(`   ${g.subject}  →  ${g.id}`);
+      // Print groups on connect so we can grab JIDs from logs
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        console.log("\n📋 Groups the bot is in:");
+        for (const groupId in groups) {
+          const g = groups[groupId];
+          console.log(`   ${g.subject}  →  ${g.id}`);
+        }
+        console.log("");
+      } catch (err) {
+        console.error("❌ Failed to fetch groups:", err.message);
+      }
     }
-    console.log("");
-  } catch (err) {
-    console.error("❌ Failed to fetch groups:", err.message);
-  }
-}
   });
 
-  // ── Incoming message handler ──
-  // Holds messages briefly before forwarding, so edits can replace them
-const pendingMessages = new Map();
-const DEBOUNCE_MS = 7000;
+  // ── Holds messages briefly before forwarding, so edits can replace them ──
+  const pendingMessages = new Map();
+  const DEBOUNCE_MS = 7000;
 
-async function forwardToN8n(jid, senderNumber, text, originalMsg) {
-  if (!N8N_WEBHOOK_URL) return;
-  try {
-    await axios.post(N8N_WEBHOOK_URL, {
-      from: senderNumber,
-      jid: jid,
-      message: text,
-      timestamp: originalMsg.messageTimestamp,
-      messageId: originalMsg.key.id,
-    });
-    console.log(`✅ Forwarded to n8n: ${text}`);
-  } catch (err) {
-    console.error("❌ Failed to forward to n8n:", err.message);
+  // ── Forward payload to n8n ──
+  // Now accepts an extraPayload object to merge in media fields
+  async function forwardToN8n(jid, senderNumber, text, originalMsg, extraPayload = {}) {
+    if (!N8N_WEBHOOK_URL) return;
+    try {
+      const payload = {
+        from: senderNumber,
+        jid: jid,
+        message: text,
+        timestamp: originalMsg.messageTimestamp,
+        messageId: originalMsg.key.id,
+        messageType: "text", // default; overridden by extraPayload if media
+        ...extraPayload,
+      };
+      await axios.post(N8N_WEBHOOK_URL, payload);
+      console.log(`✅ Forwarded to n8n [${payload.messageType}]: ${text}`);
+    } catch (err) {
+      console.error("❌ Failed to forward to n8n:", err.message);
+    }
   }
-}
 
-sock.ev.on("messages.upsert", async ({ messages, type }) => {
-  // Process both real-time (notify) and historical/offline (append) messages
-  if (type !== "notify" && type !== "append") return;
+  // ── Incoming message handler ──
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    // Process both real-time (notify) and historical/offline (append) messages
+    if (type !== "notify" && type !== "append") return;
 
-  for (const msg of messages) {
-    if (msg.key.remoteJid === "status@broadcast") continue;
-    if (msg.key.fromMe) continue;
+    for (const msg of messages) {
+      if (msg.key.remoteJid === "status@broadcast") continue;
+      if (msg.key.fromMe) continue;
 
-    // Dedup: skip if we've already processed this message ID
-    const messageId = msg.key.id;
-    if (messageId && await isMessageProcessed(messageId)) {
-      console.log(`⏭️  Skipping already-processed message ${messageId}`);
-      continue;
-    }
-    if (messageId) {
-      await markMessageProcessed(messageId);
-    }
-
-    const from = msg.key.remoteJid;
-    const senderNumber = from.replace("@s.whatsapp.net", "").replace("@lid", "");
-    const isGroup = from.endsWith("@g.us");
-
-    if (isGroup) continue;
-
-    const messageType = getContentType(msg.message);
-
-    // Handle message edits (WhatsApp lets users edit within 15 min)
-    if (messageType === "protocolMessage" && msg.message.protocolMessage?.type === 14) {
-      const editedContent = msg.message.protocolMessage.editedMessage;
-      let editedText = "";
-      if (editedContent?.conversation) {
-        editedText = editedContent.conversation;
-      } else if (editedContent?.extendedTextMessage?.text) {
-        editedText = editedContent.extendedTextMessage.text;
+      // Dedup: skip if we've already processed this message ID
+      const messageId = msg.key.id;
+      if (messageId && (await isMessageProcessed(messageId))) {
+        console.log(`⏭️  Skipping already-processed message ${messageId}`);
+        continue;
+      }
+      if (messageId) {
+        await markMessageProcessed(messageId);
       }
 
-      if (editedText) {
-        console.log(`✏️ Edit from ${senderNumber}: ${editedText}`);
+      const from = msg.key.remoteJid;
+      const senderNumber = from
+        .replace("@s.whatsapp.net", "")
+        .replace("@lid", "");
+      const isGroup = from.endsWith("@g.us");
 
-        const pending = pendingMessages.get(from);
-        if (pending) {
-          console.log(`🔄 Replacing pending message with edit`);
-          clearTimeout(pending.timer);
-          pending.text = editedText;
-          pending.timer = setTimeout(async () => {
-            await forwardToN8n(from, senderNumber, pending.text, msg);
-            pendingMessages.delete(from);
-          }, DEBOUNCE_MS);
-          pendingMessages.set(from, pending);
+      if (isGroup) continue;
+
+      const messageType = getContentType(msg.message);
+
+      // ── Handle message edits (WhatsApp lets users edit within 15 min) ──
+      if (
+        messageType === "protocolMessage" &&
+        msg.message.protocolMessage?.type === 14
+      ) {
+        const editedContent = msg.message.protocolMessage.editedMessage;
+        let editedText = "";
+        if (editedContent?.conversation) {
+          editedText = editedContent.conversation;
+        } else if (editedContent?.extendedTextMessage?.text) {
+          editedText = editedContent.extendedTextMessage.text;
+        }
+
+        if (editedText) {
+          console.log(`✏️ Edit from ${senderNumber}: ${editedText}`);
+
+          const pending = pendingMessages.get(from);
+          if (pending) {
+            console.log(`🔄 Replacing pending message with edit`);
+            clearTimeout(pending.timer);
+            pending.text = editedText;
+            pending.timer = setTimeout(async () => {
+              await forwardToN8n(from, senderNumber, pending.text, msg, pending.extraPayload || {});
+              pendingMessages.delete(from);
+            }, DEBOUNCE_MS);
+            pendingMessages.set(from, pending);
+          } else {
+            console.log(`⚠️ Late edit, forwarding as correction note`);
+            try {
+              await sock.sendPresenceUpdate("composing", from);
+            } catch (err) {}
+            await forwardToN8n(
+              from,
+              senderNumber,
+              `[CORRECTION FROM LEAD: My previous message should actually be "${editedText}". Please use this corrected version.]`,
+              msg
+            );
+          }
+        }
+        continue;
+      }
+
+      // ── Parse message content by type ──
+      let text = "";
+      let extraPayload = {};
+
+      if (messageType === "conversation") {
+        // ── Plain text ──
+        text = msg.message.conversation;
+
+      } else if (messageType === "extendedTextMessage") {
+        // ── Text with link preview or formatting ──
+        text = msg.message.extendedTextMessage.text;
+
+      } else if (messageType === "audioMessage") {
+        // ── Voice note ──
+        // Download as buffer and encode to base64 for n8n
+        // n8n side: decode base64 → send to OpenAI Whisper for transcription
+        try {
+          console.log(`🎙️ Voice note from ${senderNumber} — downloading...`);
+          const buffer = await downloadMediaMessage(
+            msg,
+            "buffer",
+            {},
+            {
+              logger: pino({ level: "silent" }),
+              reuploadRequest: sock.updateMediaMessage,
+            }
+          );
+          const base64Audio = buffer.toString("base64");
+          const mimetype =
+            msg.message.audioMessage.mimetype || "audio/ogg; codecs=opus";
+          const duration = msg.message.audioMessage.seconds || 0;
+
+          text = "[Voice Note]";
+          extraPayload = {
+            messageType: "audio",
+            audio: {
+              base64: base64Audio,
+              mimetype: mimetype,
+              durationSeconds: duration,
+            },
+          };
+          console.log(`🎙️ Voice note downloaded (${duration}s) from ${senderNumber}`);
+        } catch (err) {
+          console.error("❌ Failed to download voice note:", err.message);
+          continue;
+        }
+
+      } else if (messageType === "imageMessage") {
+        // ── Image (including competitor pricing screenshots) ──
+        // Download as buffer and encode to base64 for n8n
+        // n8n side: pass base64 to Claude Vision or GPT-4o Vision
+        // Prompt suggestion: "If this is a competitor pricing screenshot, extract
+        // prices and compare with ours. Otherwise describe what the lead is showing."
+        try {
+          console.log(`🖼️ Image from ${senderNumber} — downloading...`);
+          const buffer = await downloadMediaMessage(
+            msg,
+            "buffer",
+            {},
+            {
+              logger: pino({ level: "silent" }),
+              reuploadRequest: sock.updateMediaMessage,
+            }
+          );
+          const base64Image = buffer.toString("base64");
+          const mimetype =
+            msg.message.imageMessage.mimetype || "image/jpeg";
+          const caption = msg.message.imageMessage.caption || "";
+
+          text = caption ? `[Image] ${caption}` : "[Image]";
+          extraPayload = {
+            messageType: "image",
+            image: {
+              base64: base64Image,
+              mimetype: mimetype,
+              caption: caption,
+            },
+          };
+          console.log(`🖼️ Image downloaded from ${senderNumber}${caption ? ` — caption: "${caption}"` : ""}`);
+        } catch (err) {
+          console.error("❌ Failed to download image:", err.message);
+          continue;
+        }
+
+      } else {
+        // ── Unsupported type — skip ──
+        console.log(
+          `📦 Ignoring unsupported message type (${messageType}) from ${senderNumber}`
+        );
+        continue;
+      }
+
+      console.log(`📩 Message from ${senderNumber} [${extraPayload.messageType || "text"}]: ${text}`);
+
+      try {
+        await sock.readMessages([msg.key]);
+        await sock.sendPresenceUpdate("composing", from);
+      } catch (err) {
+        console.error("Presence/read failed:", err.message);
+      }
+
+      // ── Debounce: concatenate rapid messages (handles multi-part questions) ──
+      // Messages sent within DEBOUNCE_MS of each other are merged into one payload
+      // The AI system prompt should handle numbered answers for multi-part questions
+      const existingPending = pendingMessages.get(from);
+      if (existingPending) {
+        clearTimeout(existingPending.timer);
+        // Only concatenate text; if new message is media, it goes separately
+        if (!extraPayload.messageType) {
+          text = existingPending.text + "\n" + text;
+          extraPayload = existingPending.extraPayload || {};
         } else {
-          console.log(`⚠️ Late edit, forwarding as correction note`);
-          try {
-            await sock.sendPresenceUpdate('composing', from);
-          } catch (err) {}
+          // Media arrived after a pending text — flush the text first, then handle media
           await forwardToN8n(
             from,
             senderNumber,
-            `[CORRECTION FROM LEAD: My previous message should actually be "${editedText}". Please use this corrected version.]`,
-            msg
+            existingPending.text,
+            msg,
+            existingPending.extraPayload || {}
           );
+          pendingMessages.delete(from);
         }
       }
-      continue;
+
+      const timer = setTimeout(async () => {
+        await forwardToN8n(from, senderNumber, text, msg, extraPayload);
+        pendingMessages.delete(from);
+      }, DEBOUNCE_MS);
+
+      pendingMessages.set(from, {
+        text,
+        timer,
+        msgKey: msg.key,
+        extraPayload,
+      });
     }
-
-    let text = "";
-    if (messageType === "conversation") {
-      text = msg.message.conversation;
-    } else if (messageType === "extendedTextMessage") {
-      text = msg.message.extendedTextMessage.text;
-    } else {
-      console.log(`📦 Ignoring non-text message (${messageType}) from ${senderNumber}`);
-      continue;
-    }
-
-    console.log(`📩 Message from ${senderNumber}: ${text}`);
-
-    try {
-      await sock.readMessages([msg.key]);
-      await sock.sendPresenceUpdate('composing', from);
-    } catch (err) {
-      console.error("Presence/read failed:", err.message);
-    }
-
-    const existingPending = pendingMessages.get(from);
-    if (existingPending) {
-      clearTimeout(existingPending.timer);
-      text = existingPending.text + "\n" + text;
-    }
-
-   const timer = setTimeout(async () => {
-      await forwardToN8n(from, senderNumber, text, msg);
-      pendingMessages.delete(from);
-    }, DEBOUNCE_MS);
-
-    pendingMessages.set(from, {
-      text,
-      timer,
-      msgKey: msg.key
-    });
-  }
-});
+  });
 }
+
 // ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
 
 app.get("/", (req, res) => {
   res.json({
     status: isConnected ? "connected" : "disconnected",
-    message: isConnected ? "WhatsApp bot is running ✅" : "Bot not connected yet",
+    message: isConnected
+      ? "WhatsApp bot is running ✅"
+      : "Bot not connected yet",
   });
 });
 
 app.get("/qr", async (req, res) => {
   if (isConnected) {
-    return res.send("<h2>✅ WhatsApp is already connected! No QR needed.</h2>");
+    return res.send(
+      "<h2>✅ WhatsApp is already connected! No QR needed.</h2>"
+    );
   }
   if (!currentQR) {
-    return res.send("<h2>⏳ QR code not ready yet. Wait 10 seconds and refresh.</h2>");
+    return res.send(
+      "<h2>⏳ QR code not ready yet. Wait 10 seconds and refresh.</h2>"
+    );
   }
   try {
     const qrImage = await QRCode.toDataURL(currentQR);
@@ -329,29 +450,31 @@ app.post("/send", async (req, res) => {
 
   const { to, message, mentions, imageUrl } = req.body;
 
-if (!to || !message) {
-  return res.status(400).json({ error: "Missing 'to' or 'message' in body" });
-}
-
-try {
-  const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
-  await sock.sendPresenceUpdate('paused', jid);
-
-  let messageOptions;
-  if (imageUrl) {
-    messageOptions = {
-      image: { url: imageUrl },
-      caption: message
-    };
-  } else {
-    messageOptions = { text: message };
+  if (!to || !message) {
+    return res
+      .status(400)
+      .json({ error: "Missing 'to' or 'message' in body" });
   }
 
-  if (mentions && Array.isArray(mentions) && mentions.length > 0) {
-    messageOptions.mentions = mentions;
-  }
+  try {
+    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+    await sock.sendPresenceUpdate("paused", jid);
 
-  await sock.sendMessage(jid, messageOptions);
+    let messageOptions;
+    if (imageUrl) {
+      messageOptions = {
+        image: { url: imageUrl },
+        caption: message,
+      };
+    } else {
+      messageOptions = { text: message };
+    }
+
+    if (mentions && Array.isArray(mentions) && mentions.length > 0) {
+      messageOptions.mentions = mentions;
+    }
+
+    await sock.sendMessage(jid, messageOptions);
     console.log(`📤 Sent to ${to}: ${message}`);
     res.json({ success: true });
   } catch (err) {
