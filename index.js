@@ -44,16 +44,61 @@ async function clearAuth() {
     console.error("❌ Failed to clear auth:", err.message);
   }
 }
+// Ensure the processed_messages table exists (for dedup)
+async function ensureProcessedTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS processed_messages (
+        message_id TEXT PRIMARY KEY,
+        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Cleanup old IDs so the table doesn't grow forever
+    await pool.query(`
+      DELETE FROM processed_messages
+      WHERE processed_at < NOW() - INTERVAL '7 days'
+    `);
+    console.log("✅ processed_messages table ready");
+  } catch (err) {
+    console.error("❌ Failed to set up processed_messages table:", err.message);
+  }
+}
 
+// Check if a message ID has already been processed
+async function isMessageProcessed(messageId) {
+  try {
+    const result = await pool.query(
+      "SELECT 1 FROM processed_messages WHERE message_id = $1",
+      [messageId]
+    );
+    return result.rows.length > 0;
+  } catch (err) {
+    console.error("Dedup check failed:", err.message);
+    return false;
+  }
+}
+
+// Mark a message ID as processed
+async function markMessageProcessed(messageId) {
+  try {
+    await pool.query(
+      "INSERT INTO processed_messages (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
+      [messageId]
+    );
+  } catch (err) {
+    console.error("Failed to mark message processed:", err.message);
+  }
+}
 async function connectToWhatsApp() {
   const { state, saveCreds } = await usePostgresAuthState(pool);
   const { version } = await fetchLatestBaileysVersion();
 
- sock = makeWASocket({
+sock = makeWASocket({
   version,
   logger: pino({ level: "silent" }),
   auth: state,
   browser: ["LeadQualBot", "Chrome", "1.0.0"],
+  syncFullHistory: true,
 });
 
   // ── Save credentials whenever they update ──
@@ -136,11 +181,22 @@ async function forwardToN8n(jid, senderNumber, text, originalMsg) {
 }
 
 sock.ev.on("messages.upsert", async ({ messages, type }) => {
-  if (type !== "notify") return;
+  // Process both real-time (notify) and historical/offline (append) messages
+  if (type !== "notify" && type !== "append") return;
 
   for (const msg of messages) {
     if (msg.key.remoteJid === "status@broadcast") continue;
     if (msg.key.fromMe) continue;
+
+    // Dedup: skip if we've already processed this message ID
+    const messageId = msg.key.id;
+    if (messageId && await isMessageProcessed(messageId)) {
+      console.log(`⏭️  Skipping already-processed message ${messageId}`);
+      continue;
+    }
+    if (messageId) {
+      await markMessageProcessed(messageId);
+    }
 
     const from = msg.key.remoteJid;
     const senderNumber = from.replace("@s.whatsapp.net", "").replace("@lid", "");
@@ -305,7 +361,8 @@ try {
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  await ensureProcessedTable();
   connectToWhatsApp();
 });
