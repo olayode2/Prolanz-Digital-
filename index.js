@@ -187,7 +187,7 @@ async function connectToWhatsApp() {
     logger: pino({ level: "silent" }),
     auth: state,
     browser: ["LeadQualBot", "Chrome", "1.0.0"],
-    syncFullHistory: true,
+    syncFullHistory: false,
   });
 
   // ── Save credentials whenever they update ──
