@@ -208,6 +208,15 @@ async function connectToWhatsApp() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.log("❌ Connection closed. Reason:", reason);
 
+      if (reason === DisconnectReason.badSession || 
+    lastDisconnect?.error?.message?.includes('Bad MAC') ||
+    lastDisconnect?.error?.message?.includes('bad-mac')) {
+  console.log('🔑 Bad MAC / Bad Session detected — clearing auth and reconnecting fresh');
+  await clearAuth();
+  reconnectAttempts = 0;
+  setTimeout(() => connectToWhatsApp(), 3000);
+  return;
+}
       if (reason === DisconnectReason.loggedOut) {
         console.log("Logged out by user — clearing auth, will need fresh QR scan...");
         await clearAuth();
