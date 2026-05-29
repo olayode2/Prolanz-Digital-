@@ -100,7 +100,7 @@ async function markMessageProcessed(messageId) {
 // out-of-sync responses. A safety timeout auto-releases a stuck lock after 30s.
 const processingLocks = new Set();   // JIDs currently being processed by n8n
 const messageQueues = new Map();     // JID -> queued payload waiting for the lock
-const LOCK_TIMEOUT_MS = 30000;       // safety: force-release a stuck lock after 30s
+const LOCK_TIMEOUT_MS = 60000;       // safety: force-release a stuck lock after 30s
 
 // Post a payload to n8n (self-contained; callable from anywhere, no sock needed)
 async function sendToN8n(payload) {
