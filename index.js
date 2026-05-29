@@ -19,7 +19,7 @@ const { usePostgresAuthState } = require("./auth-state-pg");
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
-const API_SECRET = process.env.API_SECRET || "changeme";
+const API_SECRET = process.env.API_SECRET || "123456789";
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Postgres pool — created once, persists across reconnects
@@ -250,7 +250,7 @@ async function connectToWhatsApp() {
 
   // ── Holds messages briefly before forwarding, so edits can replace them ──
   const pendingMessages = new Map();
-  const DEBOUNCE_MS = 7000;
+  const DEBOUNCE_MS = 6000;
 
   // ── Forward payload to n8n ──
   // Now accepts an extraPayload object to merge in media fields
@@ -286,9 +286,15 @@ async function connectToWhatsApp() {
       // Dedup: skip if we've already processed this message ID
       const messageId = msg.key.id;
       if (messageId && (await isMessageProcessed(messageId))) {
-        console.log(`⏭️  Skipping already-processed message ${messageId}`);
-        continue;
-      }
+  const msgTimestamp = msg.messageTimestamp * 1000;
+  const now = Date.now();
+  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
+  if (ageMinutes > 30) {
+    console.log(`⏭️  Skipping already-processed message ${messageId}`);
+    continue;
+  }
+  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
+}
       if (messageId) {
         await markMessageProcessed(messageId);
       }
