@@ -244,29 +244,25 @@ sock.ev.on("connection.update", async (update) => {
       console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
       setTimeout(() => connectToWhatsApp(), delay);
     }
-  } else if (connection === "open") {
+ } else if (connection === "open") {
     isConnected = true;
     currentQR = null;
     reconnectAttempts = 0;
     console.log("✅ WhatsApp connected successfully!");
+    // Print groups on connect so we can grab JIDs from logs
+    try {
+      const groups = await sock.groupFetchAllParticipating();
+      console.log("\n📋 Groups the bot is in:");
+      for (const groupId in groups) {
+        const g = groups[groupId];
+        console.log(`   ${g.subject}  →  ${g.id}`);
+      }
+      console.log("");
+    } catch (err) {
+      console.error("❌ Failed to fetch groups:", err.message);
+    }
   }
 });
-
-      // Print groups on connect so we can grab JIDs from logs
-      try {
-        const groups = await sock.groupFetchAllParticipating();
-        console.log("\n📋 Groups the bot is in:");
-        for (const groupId in groups) {
-          const g = groups[groupId];
-          console.log(`   ${g.subject}  →  ${g.id}`);
-        }
-        console.log("");
-      } catch (err) {
-        console.error("❌ Failed to fetch groups:", err.message);
-      }
-    }
-  });
-
   // ── Holds messages briefly before forwarding, so edits can replace them ──
   const pendingMessages = new Map();
   const DEBOUNCE_MS = 6000;
