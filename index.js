@@ -35,7 +35,7 @@ let sock = null;
 let isConnected = false;
 let currentQR = null;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 // Wipe stored auth (used when WhatsApp logs us out or session is bad)
 async function clearAuth() {
@@ -194,7 +194,7 @@ async function connectToWhatsApp() {
   sock.ev.on("creds.update", saveCreds);
 
   // ── Connection state handler ──
- sock.ev.on("connection.update", async (update) => {
+sock.ev.on("connection.update", async (update) => {
   const { connection, lastDisconnect, qr } = update;
   
   if (qr) {
@@ -202,23 +202,17 @@ async function connectToWhatsApp() {
     console.log("⚡ Scan QR code at /qr endpoint or in terminal:");
     qrcode.generate(qr, { small: true });
   }
-
   if (connection === "close") {
     isConnected = false;
     const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
     const errorMessage = lastDisconnect?.error?.message || '';
     console.log("❌ Connection closed. Reason:", reason, errorMessage);
-
     const isBadMac = 
       reason === DisconnectReason.badSession ||
       errorMessage.includes('Bad MAC') ||
       errorMessage.includes('bad-mac');
-
     const isLoggedOut = reason === DisconnectReason.loggedOut;
-    
-    // 408 = connection timeout, just reconnect without wiping
     const isTimeout = reason === 408 || reason === 503;
-
     if (isLoggedOut) {
       console.log("Logged out by user — clearing auth, will need fresh QR scan...");
       await clearAuth();
@@ -226,7 +220,6 @@ async function connectToWhatsApp() {
       setTimeout(() => connectToWhatsApp(), 3000);
       return;
     }
-
     if (isBadMac) {
       console.log('🔑 Bad MAC / Bad Session — clearing auth and reconnecting fresh');
       await clearAuth();
@@ -234,18 +227,14 @@ async function connectToWhatsApp() {
       setTimeout(() => connectToWhatsApp(), 5000);
       return;
     }
-
     if (isTimeout) {
       console.log(`⏱️ Timeout disconnect (${reason}) — reconnecting without wiping auth...`);
-      reconnectAttempts = 0; // reset so it doesn't accumulate
+      reconnectAttempts = 0;
       setTimeout(() => connectToWhatsApp(), 5000);
       return;
     }
-
-    // Generic reconnect with backoff
     reconnectAttempts++;
     const delay = Math.min(3000 * reconnectAttempts, 60000);
-
     if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
       console.log(`❌ Failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Wiping auth as last resort.`);
       await clearAuth();
@@ -255,7 +244,6 @@ async function connectToWhatsApp() {
       console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
       setTimeout(() => connectToWhatsApp(), delay);
     }
-
   } else if (connection === "open") {
     isConnected = true;
     currentQR = null;
