@@ -215,7 +215,7 @@ sock.ev.on("connection.update", async (update) => {
       errorMessage.includes('Bad MAC') ||
       errorMessage.includes('bad-mac');
     const isLoggedOut = reason === DisconnectReason.loggedOut;
-    const isTimeout = reason === 408 || reason === 503;
+    const isTimeout = reason === 408 || reason === 503 || reason === 428;
     if (isLoggedOut) {
       console.log("Logged out by user — clearing auth, will need fresh QR scan...");
       await clearAuth();
