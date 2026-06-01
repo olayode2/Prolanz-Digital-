@@ -205,17 +205,22 @@ sock.ev.on("connection.update", async (update) => {
     console.log("⚡ Scan QR code at /qr endpoint or in terminal:");
     qrcode.generate(qr, { small: true });
   }
-  if (connection === "close") {
+ if (connection === "close") {
     isConnected = false;
     const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
     const errorMessage = lastDisconnect?.error?.message || '';
     console.log("❌ Connection closed. Reason:", reason, errorMessage);
+
     const isBadMac = 
       reason === DisconnectReason.badSession ||
-      errorMessage.includes('Bad MAC') ||
-      errorMessage.includes('bad-mac');
+      (errorMessage.includes('Bad MAC') ||
+      errorMessage.includes('bad-mac')) &&
+      reason !== 500;
+
     const isLoggedOut = reason === DisconnectReason.loggedOut;
     const isTimeout = reason === 408 || reason === 503 || reason === 428;
+    const isStreamError = reason === 500;
+
     if (isLoggedOut) {
       console.log("Logged out by user — clearing auth, will need fresh QR scan...");
       await clearAuth();
@@ -223,6 +228,14 @@ sock.ev.on("connection.update", async (update) => {
       setTimeout(() => connectToWhatsApp(), 3000);
       return;
     }
+
+    if (isStreamError) {
+      console.log('⚡ Stream error — reconnecting without wiping auth...');
+      reconnectAttempts = 0;
+      setTimeout(() => connectToWhatsApp(), 5000);
+      return;
+    }
+
     if (isBadMac) {
       console.log('🔑 Bad MAC / Bad Session — clearing auth and reconnecting fresh');
       await clearAuth();
@@ -230,12 +243,14 @@ sock.ev.on("connection.update", async (update) => {
       setTimeout(() => connectToWhatsApp(), 5000);
       return;
     }
+
     if (isTimeout) {
       console.log(`⏱️ Timeout disconnect (${reason}) — reconnecting without wiping auth...`);
       reconnectAttempts = 0;
       setTimeout(() => connectToWhatsApp(), 5000);
       return;
     }
+
     reconnectAttempts++;
     const delay = Math.min(3000 * reconnectAttempts, 60000);
     if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
@@ -247,12 +262,12 @@ sock.ev.on("connection.update", async (update) => {
       console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
       setTimeout(() => connectToWhatsApp(), delay);
     }
- } else if (connection === "open") {
+
+  } else if (connection === "open") {
     isConnected = true;
     currentQR = null;
     reconnectAttempts = 0;
     console.log("✅ WhatsApp connected successfully!");
-    // Print groups on connect so we can grab JIDs from logs
     try {
       const groups = await sock.groupFetchAllParticipating();
       console.log("\n📋 Groups the bot is in:");
