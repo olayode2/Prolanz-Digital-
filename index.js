@@ -14,19 +14,12 @@ const { Boom } = require("@hapi/boom");
 const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const { Pool } = require("pg");
-const { usePostgresAuthState } = require("./auth-state-pg");
-
+const { useMultiFileAuthState } = require("@whiskeysockets/baileys");
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 const API_SECRET = process.env.API_SECRET || "123456789";
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Postgres pool — created once, persists across reconnects
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
 
 const app = express();
 app.use(express.json());
@@ -40,13 +33,16 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 // Wipe stored auth (used when WhatsApp logs us out or session is bad)
 async function clearAuth() {
   try {
-    await pool.query("DELETE FROM baileys_auth");
-    console.log("🗑️  Cleared Postgres auth state");
+    const fs = require('fs');
+    const path = '/var/data/auth';
+    if (fs.existsSync(path)) {
+      fs.rmSync(path, { recursive: true, force: true });
+    }
+    console.log("🗑️  Cleared file auth state");
   } catch (err) {
     console.error("❌ Failed to clear auth:", err.message);
   }
 }
-
 // Ensure the processed_messages table exists (for dedup)
 async function ensureProcessedTable() {
   try {
@@ -179,7 +175,7 @@ function releaseLeadLock(to) {
 // ────────────────────────────────────────────────────────────────────────────
 
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await usePostgresAuthState(pool);
+  const { state, saveCreds } = await useMultiFileAuthState('/var/data/auth');
   const { version } = await fetchLatestBaileysVersion();
 
 sock = makeWASocket({
