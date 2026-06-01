@@ -182,12 +182,15 @@ async function connectToWhatsApp() {
   const { state, saveCreds } = await usePostgresAuthState(pool);
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({
+sock = makeWASocket({
     version,
     logger: pino({ level: "silent" }),
     auth: state,
     browser: ["LeadQualBot", "Chrome", "1.0.0"],
     syncFullHistory: false,
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    retryRequestDelayMs: 2000,
   });
 
   // ── Save credentials whenever they update ──
