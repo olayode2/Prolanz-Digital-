@@ -15,12 +15,23 @@ const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const { Pool } = require("pg");
 const { useMultiFileAuthState } = require("@whiskeysockets/baileys");
+const { Pool } = require("pg");
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
+const API_SECRET = process.env.API_SECRET || "123456789";
+
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 const API_SECRET = process.env.API_SECRET || "123456789";
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Postgres pool — for processed_messages dedup
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 const app = express();
 app.use(express.json());
 
