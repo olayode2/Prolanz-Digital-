@@ -51,6 +51,7 @@ async function clearAuth() {
     console.error("❌ Failed to clear auth:", err.message);
   }
 }
+
 // Ensure the processed_messages table exists (for dedup)
 async function ensureProcessedTable() {
   try {
@@ -60,7 +61,6 @@ async function ensureProcessedTable() {
         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    // Cleanup old IDs so the table doesn't grow forever
     await pool.query(`
       DELETE FROM processed_messages
       WHERE processed_at < NOW() - INTERVAL '7 days'
@@ -98,15 +98,10 @@ async function markMessageProcessed(messageId) {
 }
 
 // ─── PER-LEAD PROCESSING LOCK + QUEUE ──────────────────────────────────────────
-// Prevents premature replies: while n8n is busy processing a lead's turn, any
-// further messages from that SAME lead are held in a queue and forwarded together
-// once the reply is sent (signalled by /send), instead of triggering separate,
-// out-of-sync responses. A safety timeout auto-releases a stuck lock after 30s.
-const processingLocks = new Set();   // JIDs currently being processed by n8n
-const messageQueues = new Map();     // JID -> queued payload waiting for the lock
-const LOCK_TIMEOUT_MS = 120000;       // safety: force-release a stuck lock after 30s
+const processingLocks = new Set();
+const messageQueues = new Map();
+const LOCK_TIMEOUT_MS = 120000;
 
-// Post a payload to n8n (self-contained; callable from anywhere, no sock needed)
 async function sendToN8n(payload) {
   console.log("📤 Payload to n8n:", JSON.stringify({ message: payload.message, type: payload.messageType }));
   if (!N8N_WEBHOOK_URL) return;
@@ -118,7 +113,6 @@ async function sendToN8n(payload) {
   }
 }
 
-// Lock a lead and forward their payload, with a safety auto-release
 function lockAndSend(payload) {
   const jid = payload.jid;
   processingLocks.add(jid);
@@ -132,7 +126,6 @@ function lockAndSend(payload) {
   sendToN8n(payload);
 }
 
-// Queue a message for a lead that's currently locked (combine if one already waits)
 function queueForLead(payload) {
   const jid = payload.jid;
   const existing = messageQueues.get(jid);
@@ -140,7 +133,6 @@ function queueForLead(payload) {
     existing.message = existing.message + "\n" + payload.message;
     existing.timestamp = payload.timestamp;
     existing.messageId = payload.messageId;
-    // if the newest message carries media, keep it
     if (payload.messageType && payload.messageType !== "text") {
       existing.messageType = payload.messageType;
       if (payload.audio) existing.audio = payload.audio;
@@ -153,7 +145,6 @@ function queueForLead(payload) {
   }
 }
 
-// Release a lead's lock; if messages queued up while locked, forward them together
 function releaseLock(jid) {
   processingLocks.delete(jid);
   const queued = messageQueues.get(jid);
@@ -166,7 +157,6 @@ function releaseLock(jid) {
   }
 }
 
-// Release using the recipient string from /send (tolerates JID-format differences)
 function releaseLeadLock(to) {
   const direct = to.includes("@") ? to : `${to}@s.whatsapp.net`;
   if (processingLocks.has(direct) || messageQueues.has(direct)) {
@@ -186,7 +176,7 @@ async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('/var/data/auth');
   const { version } = await fetchLatestBaileysVersion();
 
-sock = makeWASocket({
+  sock = makeWASocket({
     version,
     logger: pino({ level: "silent" }),
     auth: state,
@@ -197,101 +187,98 @@ sock = makeWASocket({
     retryRequestDelayMs: 2000,
   });
 
-  // ── Save credentials whenever they update ──
   sock.ev.on("creds.update", saveCreds);
 
-  // ── Connection state handler ──
-sock.ev.on("connection.update", async (update) => {
-  const { connection, lastDisconnect, qr } = update;
-  
-  if (qr) {
-    currentQR = qr;
-    console.log("⚡ Scan QR code at /qr endpoint or in terminal:");
-    qrcode.generate(qr, { small: true });
-  }
- if (connection === "close") {
-    isConnected = false;
-    const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-    const errorMessage = lastDisconnect?.error?.message || '';
-    console.log("❌ Connection closed. Reason:", reason, errorMessage);
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-    const isBadMac = 
-      reason === DisconnectReason.badSession ||
-      (errorMessage.includes('Bad MAC') ||
-      errorMessage.includes('bad-mac')) &&
-      reason !== 500;
-
-    const isLoggedOut = reason === DisconnectReason.loggedOut;
-    const isTimeout = reason === 408 || reason === 503 || reason === 428;
-    const isStreamError = reason === 500;
-
-    if (isLoggedOut) {
-      console.log("Logged out by user — clearing auth, will need fresh QR scan...");
-      await clearAuth();
-      reconnectAttempts = 0;
-      setTimeout(() => connectToWhatsApp(), 3000);
-      return;
+    if (qr) {
+      currentQR = qr;
+      console.log("⚡ Scan QR code at /qr endpoint or in terminal:");
+      qrcode.generate(qr, { small: true });
     }
 
-    if (isStreamError) {
-      console.log('⚡ Stream error — reconnecting without wiping auth...');
-      reconnectAttempts = 0;
-      setTimeout(() => connectToWhatsApp(), 5000);
-      return;
-    }
+    if (connection === "close") {
+      isConnected = false;
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const errorMessage = lastDisconnect?.error?.message || '';
+      console.log("❌ Connection closed. Reason:", reason, errorMessage);
 
-    if (isBadMac) {
-      console.log('🔑 Bad MAC / Bad Session — clearing auth and reconnecting fresh');
-      await clearAuth();
-      reconnectAttempts = 0;
-      setTimeout(() => connectToWhatsApp(), 5000);
-      return;
-    }
+      const isBadMac =
+        reason === DisconnectReason.badSession ||
+        (errorMessage.includes('Bad MAC') ||
+        errorMessage.includes('bad-mac')) &&
+        reason !== 500;
 
-    if (isTimeout) {
-      console.log(`⏱️ Timeout disconnect (${reason}) — reconnecting without wiping auth...`);
-      reconnectAttempts = 0;
-      setTimeout(() => connectToWhatsApp(), 5000);
-      return;
-    }
+      const isLoggedOut = reason === DisconnectReason.loggedOut;
+      const isTimeout = reason === 408 || reason === 503 || reason === 428;
+      const isStreamError = reason === 500;
 
-    reconnectAttempts++;
-    const delay = Math.min(3000 * reconnectAttempts, 60000);
-    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-      console.log(`❌ Failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Wiping auth as last resort.`);
-      await clearAuth();
-      reconnectAttempts = 0;
-      setTimeout(() => connectToWhatsApp(), 5000);
-    } else {
-      console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-      setTimeout(() => connectToWhatsApp(), delay);
-    }
-
-  } else if (connection === "open") {
-   reconnectedAt = Date.now();
-    isConnected = true;
-    currentQR = null;
-    reconnectAttempts = 0;
-    console.log("✅ WhatsApp connected successfully!");
-    try {
-      const groups = await sock.groupFetchAllParticipating();
-      console.log("\n📋 Groups the bot is in:");
-      for (const groupId in groups) {
-        const g = groups[groupId];
-        console.log(`   ${g.subject}  →  ${g.id}`);
+      if (isLoggedOut) {
+        console.log("Logged out by user — clearing auth, will need fresh QR scan...");
+        await clearAuth();
+        reconnectAttempts = 0;
+        setTimeout(() => connectToWhatsApp(), 3000);
+        return;
       }
-      console.log("");
-    } catch (err) {
-      console.error("❌ Failed to fetch groups:", err.message);
+
+      if (isStreamError) {
+        console.log('⚡ Stream error — reconnecting without wiping auth...');
+        reconnectAttempts = 0;
+        setTimeout(() => connectToWhatsApp(), 5000);
+        return;
+      }
+
+      if (isBadMac) {
+        console.log('🔑 Bad MAC / Bad Session — clearing auth and reconnecting fresh');
+        await clearAuth();
+        reconnectAttempts = 0;
+        setTimeout(() => connectToWhatsApp(), 5000);
+        return;
+      }
+
+      if (isTimeout) {
+        console.log(`⏱️ Timeout disconnect (${reason}) — reconnecting without wiping auth...`);
+        reconnectAttempts = 0;
+        setTimeout(() => connectToWhatsApp(), 5000);
+        return;
+      }
+
+      reconnectAttempts++;
+      const delay = Math.min(3000 * reconnectAttempts, 60000);
+      if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.log(`❌ Failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Wiping auth as last resort.`);
+        await clearAuth();
+        reconnectAttempts = 0;
+        setTimeout(() => connectToWhatsApp(), 5000);
+      } else {
+        console.log(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+        setTimeout(() => connectToWhatsApp(), delay);
+      }
+
+    } else if (connection === "open") {
+      reconnectedAt = Date.now();
+      isConnected = true;
+      currentQR = null;
+      reconnectAttempts = 0;
+      console.log("✅ WhatsApp connected successfully!");
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        console.log("\n📋 Groups the bot is in:");
+        for (const groupId in groups) {
+          const g = groups[groupId];
+          console.log(`   ${g.subject}  →  ${g.id}`);
+        }
+        console.log("");
+      } catch (err) {
+        console.error("❌ Failed to fetch groups:", err.message);
+      }
     }
-  }
-});
-  // ── Holds messages briefly before forwarding, so edits can replace them ──
+  });
+
   const pendingMessages = new Map();
   const DEBOUNCE_MS = 6000;
 
-  // ── Forward payload to n8n ──
-  // Now accepts an extraPayload object to merge in media fields
   async function forwardToN8n(jid, senderNumber, text, originalMsg, extraPayload = {}) {
     console.log('📤 Payload being sent:', JSON.stringify({ text, ...extraPayload }));
     if (!N8N_WEBHOOK_URL) return;
@@ -302,7 +289,7 @@ sock.ev.on("connection.update", async (update) => {
         message: text,
         timestamp: originalMsg.messageTimestamp,
         messageId: originalMsg.key.id,
-        messageType: "text", // default; overridden by extraPayload if media
+        messageType: "text",
         ...extraPayload,
       };
       await axios.post(N8N_WEBHOOK_URL, payload);
@@ -312,70 +299,28 @@ sock.ev.on("connection.update", async (update) => {
     }
   }
 
-  // ── Incoming message handler ──
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    // Process both real-time (notify) and historical/offline (append) messages
     if (type !== "notify" && type !== "append") return;
 
     for (const msg of messages) {
       if (msg.key.remoteJid === "status@broadcast") continue;
       if (msg.key.fromMe) continue;
 
-      // Dedup: skip if we've already processed this message ID
       const messageId = msg.key.id;
       if (messageId && (await isMessageProcessed(messageId))) {
-  const msgTimestamp = msg.messageTimestamp * 1000;
-  const now = Date.now();
-  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
-  
-  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
-  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
-  
-  if (!justReconnected || ageMinutes > 30) {
-    console.log(`⏭️  Skipping already-processed message ${messageId}`);
-    continue;
-  }
-  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
-}if (messageId && (await isMessageProcessed(messageId))) {
-  const msgTimestamp = msg.messageTimestamp * 1000;
-  const now = Date.now();
-  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
-  
-  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
-  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
-  
-  if (!justReconnected || ageMinutes > 30) {
-    console.log(`⏭️  Skipping already-processed message ${messageId}`);
-    continue;
-  }
-  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
-}if (messageId && (await isMessageProcessed(messageId))) {
-  const msgTimestamp = msg.messageTimestamp * 1000;
-  const now = Date.now();
-  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
-  
-  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
-  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
-  
-  if (!justReconnected || ageMinutes > 30) {
-    console.log(`⏭️  Skipping already-processed message ${messageId}`);
-    continue;
-  }
-  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
-}if (messageId && (await isMessageProcessed(messageId))) {
-  const msgTimestamp = msg.messageTimestamp * 1000;
-  const now = Date.now();
-  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
-  
-  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
-  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
-  
-  if (!justReconnected || ageMinutes > 30) {
-    console.log(`⏭️  Skipping already-processed message ${messageId}`);
-    continue;
-  }
-  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
-}
+        const msgTimestamp = msg.messageTimestamp * 1000;
+        const now = Date.now();
+        const ageMinutes = (now - msgTimestamp) / 1000 / 60;
+
+        const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
+
+        if (!justReconnected || ageMinutes > 30) {
+          console.log(`⏭️  Skipping already-processed message ${messageId}`);
+          continue;
+        }
+        console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
+      }
+
       if (messageId) {
         await markMessageProcessed(messageId);
       }
@@ -390,7 +335,6 @@ sock.ev.on("connection.update", async (update) => {
 
       const messageType = getContentType(msg.message);
 
-      // ── Handle message edits (WhatsApp lets users edit within 15 min) ──
       if (
         messageType === "protocolMessage" &&
         msg.message.protocolMessage?.type === 14
@@ -432,22 +376,16 @@ sock.ev.on("connection.update", async (update) => {
         continue;
       }
 
-      // ── Parse message content by type ──
       let text = "";
       let extraPayload = {};
 
       if (messageType === "conversation") {
-        // ── Plain text ──
         text = msg.message.conversation;
 
       } else if (messageType === "extendedTextMessage") {
-        // ── Text with link preview or formatting ──
         text = msg.message.extendedTextMessage.text;
 
       } else if (messageType === "audioMessage") {
-        // ── Voice note ──
-        // Download as buffer and encode to base64 for n8n
-        // n8n side: decode base64 → send to OpenAI Whisper for transcription
         try {
           console.log(`🎙️ Voice note from ${senderNumber} — downloading...`);
           const buffer = await downloadMediaMessage(
@@ -480,11 +418,6 @@ sock.ev.on("connection.update", async (update) => {
         }
 
       } else if (messageType === "imageMessage") {
-        // ── Image (including competitor pricing screenshots) ──
-        // Download as buffer and encode to base64 for n8n
-        // n8n side: pass base64 to Claude Vision or GPT-4o Vision
-        // Prompt suggestion: "If this is a competitor pricing screenshot, extract
-        // prices and compare with ours. Otherwise describe what the lead is showing."
         try {
           console.log(`🖼️ Image from ${senderNumber} — downloading...`);
           const buffer = await downloadMediaMessage(
@@ -517,7 +450,6 @@ sock.ev.on("connection.update", async (update) => {
         }
 
       } else {
-        // ── Unsupported type — skip ──
         console.log(
           `📦 Ignoring unsupported message type (${messageType}) from ${senderNumber}`
         );
@@ -533,18 +465,13 @@ sock.ev.on("connection.update", async (update) => {
         console.error("Presence/read failed:", err.message);
       }
 
-      // ── Debounce: concatenate rapid messages (handles multi-part questions) ──
-      // Messages sent within DEBOUNCE_MS of each other are merged into one payload
-      // The AI system prompt should handle numbered answers for multi-part questions
       const existingPending = pendingMessages.get(from);
       if (existingPending) {
         clearTimeout(existingPending.timer);
-        // Only concatenate text; if new message is media, it goes separately
         if (!extraPayload.messageType) {
           text = existingPending.text + "\n" + text;
           extraPayload = existingPending.extraPayload || {};
         } else {
-          // Media arrived after a pending text — flush the text first, then handle media
           await forwardToN8n(
             from,
             senderNumber,
@@ -557,7 +484,6 @@ sock.ev.on("connection.update", async (update) => {
       }
 
       const timer = setTimeout(async () => {
-        // Build the same payload shape forwardToN8n used
         const payload = {
           from: senderNumber,
           jid: from,
@@ -568,10 +494,8 @@ sock.ev.on("connection.update", async (update) => {
           ...extraPayload,
         };
         if (processingLocks.has(from)) {
-          // Bot is still processing this lead's previous turn — hold this one
           queueForLead(payload);
         } else {
-          // Lead is free — lock and forward
           lockAndSend(payload);
         }
         pendingMessages.delete(from);
@@ -646,7 +570,11 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+    const jid = to.includes("@g.us") ? to
+      : to.includes("@lid") ? to.replace("@lid", "@s.whatsapp.net")
+      : to.includes("@") ? to
+      : `${to}@s.whatsapp.net`;
+
     await sock.sendPresenceUpdate("paused", jid);
 
     let messageOptions;
@@ -665,8 +593,6 @@ app.post("/send", async (req, res) => {
 
     await sock.sendMessage(jid, messageOptions);
     console.log(`📤 Sent to ${to}: ${message}`);
-    // Reply delivered → release this lead's processing lock and flush any queued messages.
-    // (Group notifications target a group JID that's never locked, so this is a no-op for them.)
     releaseLeadLock(to);
     res.json({ success: true });
   } catch (err) {
