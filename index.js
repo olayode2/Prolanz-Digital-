@@ -600,8 +600,11 @@ app.post("/send", async (req, res) => {
       .json({ error: "Missing 'to' or 'message' in body" });
   }
 
-  try {
-    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+   try {
+    const jid = to.includes("@g.us") ? to
+      : to.includes("@lid") ? to.replace("@lid", "@s.whatsapp.net")
+      : to.includes("@") ? to
+      : `${to}@s.whatsapp.net`;
     await sock.sendPresenceUpdate("paused", jid);
 
     let messageOptions;
