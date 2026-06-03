@@ -325,12 +325,15 @@ async function connectToWhatsApp() {
         await markMessageProcessed(messageId);
       }
 
-      const from = msg.key.remoteJid;
-      const senderNumber = from
-        .replace("@s.whatsapp.net", "")
-        .replace("@lid", "");
-      const isGroup = from.endsWith("@g.us");
-
+      const rawFrom = msg.key.remoteJid;
+const from = rawFrom.includes("@lid")
+  ? rawFrom.replace("@lid", "@s.whatsapp.net")
+  : rawFrom;
+const senderNumber = from
+  .replace("@s.whatsapp.net", "")
+  .replace("@g.us", "");
+const isGroup = rawFrom.endsWith("@g.us");
+      
       if (isGroup) continue;
 
       const messageType = getContentType(msg.message);
