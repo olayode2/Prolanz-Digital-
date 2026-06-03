@@ -35,6 +35,7 @@ let sock = null;
 let isConnected = false;
 let currentQR = null;
 let reconnectAttempts = 0;
+let reconnectedAt = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
 // Wipe stored auth (used when WhatsApp logs us out or session is bad)
@@ -267,6 +268,7 @@ sock.ev.on("connection.update", async (update) => {
     }
 
   } else if (connection === "open") {
+   reconnectedAt = Date.now();
     isConnected = true;
     currentQR = null;
     reconnectAttempts = 0;
@@ -325,7 +327,50 @@ sock.ev.on("connection.update", async (update) => {
   const msgTimestamp = msg.messageTimestamp * 1000;
   const now = Date.now();
   const ageMinutes = (now - msgTimestamp) / 1000 / 60;
-  if (ageMinutes > 30) {
+  
+  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
+  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
+  
+  if (!justReconnected || ageMinutes > 30) {
+    console.log(`⏭️  Skipping already-processed message ${messageId}`);
+    continue;
+  }
+  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
+}if (messageId && (await isMessageProcessed(messageId))) {
+  const msgTimestamp = msg.messageTimestamp * 1000;
+  const now = Date.now();
+  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
+  
+  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
+  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
+  
+  if (!justReconnected || ageMinutes > 30) {
+    console.log(`⏭️  Skipping already-processed message ${messageId}`);
+    continue;
+  }
+  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
+}if (messageId && (await isMessageProcessed(messageId))) {
+  const msgTimestamp = msg.messageTimestamp * 1000;
+  const now = Date.now();
+  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
+  
+  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
+  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
+  
+  if (!justReconnected || ageMinutes > 30) {
+    console.log(`⏭️  Skipping already-processed message ${messageId}`);
+    continue;
+  }
+  console.log(`🔄 Reprocessing recent message ${messageId} (${Math.round(ageMinutes)}min old)`);
+}if (messageId && (await isMessageProcessed(messageId))) {
+  const msgTimestamp = msg.messageTimestamp * 1000;
+  const now = Date.now();
+  const ageMinutes = (now - msgTimestamp) / 1000 / 60;
+  
+  // Only reprocess if bot just reconnected (within last 2 minutes) AND message is recent
+  const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
+  
+  if (!justReconnected || ageMinutes > 30) {
     console.log(`⏭️  Skipping already-processed message ${messageId}`);
     continue;
   }
