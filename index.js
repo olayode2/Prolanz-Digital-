@@ -56,18 +56,18 @@ async function clearAuth() {
 async function ensureProcessedTable() {
   try {
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS processed_messages_2 (
+      CREATE TABLE IF NOT EXISTS  processed_messages_2 (
         message_id TEXT PRIMARY KEY,
         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
     await pool.query(`
-      DELETE FROM processed_messages_2
+      DELETE FROM  processed_messages_2
       WHERE processed_at < NOW() - INTERVAL '7 days'
     `);
-    console.log("✅ processed_messages_2 table ready");
+    console.log("✅  processed_messages_2 table ready");
   } catch (err) {
-    console.error("❌ Failed to set up processed_messages_2 table:", err.message);
+    console.error("❌ Failed to set up  processed_messages_2 table:", err.message);
   }
 }
 
@@ -75,7 +75,7 @@ async function ensureProcessedTable() {
 async function isMessageProcessed(messageId) {
   try {
     const result = await pool.query(
-      "SELECT 1 FROM processed_messages_2 WHERE message_id = $1",
+      "SELECT 1 FROM  processed_messages_2 WHERE message_id = $1",
       [messageId]
     );
     return result.rows.length > 0;
@@ -89,7 +89,7 @@ async function isMessageProcessed(messageId) {
 async function markMessageProcessed(messageId) {
   try {
     await pool.query(
-      "INSERT INTO processed_messages_2 (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
+      "INSERT INTO  processed_messages_2 (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
       [messageId]
     );
   } catch (err) {
@@ -333,7 +333,7 @@ const senderNumber = from
   .replace("@s.whatsapp.net", "")
   .replace("@g.us", "");
 const isGroup = rawFrom.endsWith("@g.us");
-      
+
       if (isGroup) continue;
 
       const messageType = getContentType(msg.message);
