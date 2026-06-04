@@ -356,9 +356,9 @@ async function connectToWhatsApp() {
     if (!N8N_WEBHOOK_URL) return;
     try {
       const payload = {
-        from: senderNumber,
+        from: String(senderNumber),
         jid: jid,
-        from_number: senderNumber,
+        from_number: String(senderNumber),
         message: text,
         timestamp: originalMsg.messageTimestamp,
         messageId: originalMsg.key.id,
@@ -559,9 +559,9 @@ async function connectToWhatsApp() {
 
       const timer = setTimeout(async () => {
         const payload = {
-          from: senderNumber,
+          from: String(senderNumber),
           jid: from,
-          from_number: senderNumber,
+          from_number: String(senderNumber),
           message: text,
           timestamp: msg.messageTimestamp,
           messageId: msg.key.id,
@@ -637,7 +637,7 @@ app.post("/send", async (req, res) => {
   }
 
   const { to: toRaw, message, mentions, imageUrl } = req.body;
-const to = String(toRaw);
+  const to = String(toRaw);
 
   if (!to || !message) {
     return res
