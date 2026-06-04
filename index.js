@@ -213,7 +213,7 @@ async function connectToWhatsApp() {
       if (raw.endsWith("@g.us")) return raw;
 
       if (raw.includes("@lid")) {
-        const lidNumber = raw.replace(/@.*$/, "");
+        const lidNumber = raw.replace(/@.*$/, "").replace(/\D/g, "");
 
         // 1. Check our lid map
         if (lidToJid.has(raw)) {
@@ -229,10 +229,13 @@ async function connectToWhatsApp() {
         try {
           const results = await sock.onWhatsApp(lidNumber);
           if (results && results[0]?.jid) {
-            lidToJid.set(raw, results[0].jid);
-            lidToJid.set(lidNumber, results[0].jid);
-            console.log(`✅ onWhatsApp resolved ${lidNumber} → ${results[0].jid}`);
-            return results[0].jid;
+            const resolvedJid = results[0].jid.includes("@")
+              ? results[0].jid
+              : `${results[0].jid}@s.whatsapp.net`;
+            lidToJid.set(raw, resolvedJid);
+            lidToJid.set(lidNumber, resolvedJid);
+            console.log(`✅ onWhatsApp resolved ${lidNumber} → ${resolvedJid}`);
+            return resolvedJid;
           }
         } catch (err) {
           console.log(`⚠️ onWhatsApp failed for ${lidNumber}:`, err.message);
@@ -650,7 +653,7 @@ app.post("/send", async (req, res) => {
     if (to.endsWith("@g.us")) {
       jid = to;
     } else {
-      const bare = to.replace(/@.*$/, "");
+      const bare = to.replace(/@.*$/, "").replace(/\D/g, "");
       jid = `${bare}@s.whatsapp.net`;
     }
 
