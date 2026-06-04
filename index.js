@@ -224,6 +224,16 @@ async function connectToWhatsApp() {
       if (raw.endsWith("@g.us")) return raw;
 
       if (raw.includes("@lid")) {
+        // ✅ PRIMARY FIX: senderPn is the real phone number Baileys puts in msg.key
+        const senderPn = msg.key.senderPn;
+        if (senderPn) {
+          const resolved = senderPn.includes("@")
+            ? senderPn
+            : `${senderPn}@s.whatsapp.net`;
+          console.log(`✅ senderPn resolved ${raw} → ${resolved}`);
+          return resolved;
+        }
+
         const lidFull = raw;
         const lidNum = raw.replace(/@.*$/, "");
 
@@ -231,7 +241,7 @@ async function connectToWhatsApp() {
         if (lidToJid.has(lidFull)) return lidToJid.get(lidFull);
         if (lidToJid.has(lidNum)) return lidToJid.get(lidNum);
 
-        // 2. Check message's own notify/verifiedName context
+        // 2. Check message's own participant field
         const notifyPhone = msg.key.participant?.replace(/@.*$/, "");
         if (notifyPhone && !notifyPhone.includes(lidNum)) {
           const resolved = `${notifyPhone}@s.whatsapp.net`;
