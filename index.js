@@ -215,7 +215,7 @@ async function connectToWhatsApp() {
           console.log(`⚠️ Could not resolve @lid ${lidNumber}:`, err.message);
         }
         // Fallback: replace domain (number may still be lid-encoded, but best effort)
-        return raw.replace("@lid", "@s.whatsapp.net");
+       return `${raw.replace(/@.*$/, "")}@s.whatsapp.net`;
       }
 
       return raw;
