@@ -636,7 +636,8 @@ app.post("/send", async (req, res) => {
     return res.status(503).json({ error: "WhatsApp not connected yet" });
   }
 
-  const { to, message, mentions, imageUrl } = req.body;
+  const { to: toRaw, message, mentions, imageUrl } = req.body;
+const to = String(toRaw);
 
   if (!to || !message) {
     return res
