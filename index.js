@@ -22,7 +22,7 @@ const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 const API_SECRET = process.env.API_SECRET || "123456789";
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Postgres pool — for processed_messages dedup only
+// Postgres pool — for processed_messages_3 dedup only
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -52,22 +52,22 @@ async function clearAuth() {
   }
 }
 
-// Ensure the processed_messages table exists (for dedup)
+// Ensure the processed_messages_3 table exists (for dedup)
 async function ensureProcessedTable() {
   try {
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS processed_messages (
+      CREATE TABLE IF NOT EXISTS processed_messages_3 (
         message_id TEXT PRIMARY KEY,
         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
     await pool.query(`
-      DELETE FROM processed_messages
+      DELETE FROM processed_messages_3
       WHERE processed_at < NOW() - INTERVAL '7 days'
     `);
-    console.log("✅ processed_messages table ready");
+    console.log("✅ processed_messages_3 table ready");
   } catch (err) {
-    console.error("❌ Failed to set up processed_messages table:", err.message);
+    console.error("❌ Failed to set up processed_messages_3 table:", err.message);
   }
 }
 
@@ -75,7 +75,7 @@ async function ensureProcessedTable() {
 async function isMessageProcessed(messageId) {
   try {
     const result = await pool.query(
-      "SELECT 1 FROM processed_messages WHERE message_id = $1",
+      "SELECT 1 FROM processed_messages_3 WHERE message_id = $1",
       [messageId]
     );
     return result.rows.length > 0;
@@ -89,7 +89,7 @@ async function isMessageProcessed(messageId) {
 async function markMessageProcessed(messageId) {
   try {
     await pool.query(
-      "INSERT INTO processed_messages (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
+      "INSERT INTO processed_messages_3 (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
       [messageId]
     );
   } catch (err) {
