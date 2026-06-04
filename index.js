@@ -204,11 +204,20 @@ async function connectToWhatsApp() {
       const errorMessage = lastDisconnect?.error?.message || '';
       console.log("❌ Connection closed. Reason:", reason, errorMessage);
 
+     if (isPrekey) {
+  console.log('🔑 Prekey bundle — reconnecting without wiping auth...');
+  reconnectAttempts = 0;
+  setTimeout(() => connectToWhatsApp(), 3000);
+  return;
+}
       const isBadMac =
         reason === DisconnectReason.badSession ||
         (errorMessage.includes('Bad MAC') ||
         errorMessage.includes('bad-mac')) &&
         reason !== 500;
+      const isPrekey = errorMessage.includes('prekey') || 
+        errorMessage.includes('pre_key') ||
+        errorMessage.includes('preKey');
 
       const isLoggedOut = reason === DisconnectReason.loggedOut;
       const isTimeout = reason === 408 || reason === 503 || reason === 428;
@@ -312,8 +321,7 @@ async function connectToWhatsApp() {
         const now = Date.now();
         const ageMinutes = (now - msgTimestamp) / 1000 / 60;
 
-        const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
-
+        const justReconnected = reconnectedAt && (now - reconnectedAt) < 600000;
         if (!justReconnected || ageMinutes > 30) {
           console.log(`⏭️  Skipping already-processed message ${messageId}`);
           continue;
