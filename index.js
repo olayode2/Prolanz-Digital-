@@ -38,7 +38,16 @@ let reconnectAttempts = 0;
 let reconnectedAt = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
-// Wipe stored auth (used when WhatsApp logs us out or session is bad)
+// ─── LID → PHONE MAP ─────────────────────────────────────────────────────────
+const lidToJid = new Map();
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── JID HELPER ──────────────────────────────────────────────────────────────
+function jidToNumber(jid) {
+  return jid.replace(/@.*$/, "");
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function clearAuth() {
   try {
     const fs = require('fs');
@@ -52,30 +61,28 @@ async function clearAuth() {
   }
 }
 
-// Ensure the processed_messages_2 table exists (for dedup)
 async function ensureProcessedTable() {
   try {
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS  processed_messages_2 (
+      CREATE TABLE IF NOT EXISTS processed_messages_2 (
         message_id TEXT PRIMARY KEY,
         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
     await pool.query(`
-      DELETE FROM  processed_messages_2
+      DELETE FROM processed_messages_2
       WHERE processed_at < NOW() - INTERVAL '7 days'
     `);
-    console.log("✅  processed_messages_2 table ready");
+    console.log("✅ processed_messages_2 table ready");
   } catch (err) {
-    console.error("❌ Failed to set up  processed_messages_2 table:", err.message);
+    console.error("❌ Failed to set up processed_messages_2 table:", err.message);
   }
 }
 
-// Check if a message ID has already been processed
 async function isMessageProcessed(messageId) {
   try {
     const result = await pool.query(
-      "SELECT 1 FROM  processed_messages_2 WHERE message_id = $1",
+      "SELECT 1 FROM processed_messages_2 WHERE message_id = $1",
       [messageId]
     );
     return result.rows.length > 0;
@@ -85,11 +92,10 @@ async function isMessageProcessed(messageId) {
   }
 }
 
-// Mark a message ID as processed
 async function markMessageProcessed(messageId) {
   try {
     await pool.query(
-      "INSERT INTO  processed_messages_2 (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
+      "INSERT INTO processed_messages_2 (message_id) VALUES ($1) ON CONFLICT DO NOTHING",
       [messageId]
     );
   } catch (err) {
@@ -97,7 +103,7 @@ async function markMessageProcessed(messageId) {
   }
 }
 
-// ─── PER-LEAD PROCESSING LOCK + QUEUE ──────────────────────────────────────────
+// ─── PER-LEAD PROCESSING LOCK + QUEUE ────────────────────────────────────────
 const processingLocks = new Set();
 const messageQueues = new Map();
 const LOCK_TIMEOUT_MS = 120000;
@@ -170,7 +176,7 @@ function releaseLeadLock(to) {
     if (jid.replace(/@.*$/, "") === num) return releaseLock(jid);
   }
 }
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('/var/data/auth');
@@ -186,6 +192,91 @@ async function connectToWhatsApp() {
     keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 2000,
   });
+
+  // Build lid → real JID map from contact updates
+  sock.ev.on("contacts.upsert", (contacts) => {
+    for (const contact of contacts) {
+      if (contact.lid && contact.id?.endsWith("@s.whatsapp.net")) {
+        lidToJid.set(contact.lid, contact.id);
+        lidToJid.set(contact.lid.replace(/@.*$/, ""), contact.id);
+        console.log(`📇 Mapped lid ${contact.lid} → ${contact.id}`);
+      }
+    }
+  });
+
+  sock.ev.on("contacts.update", (updates) => {
+    for (const update of updates) {
+      if (update.lid && update.id?.endsWith("@s.whatsapp.net")) {
+        lidToJid.set(update.lid, update.id);
+        lidToJid.set(update.lid.replace(/@.*$/, ""), update.id);
+        console.log(`📇 Updated lid map ${update.lid} → ${update.id}`);
+      }
+    }
+  });
+
+  // ── JID resolver — tries every available source to get real phone number ──
+  async function resolveJid(msg) {
+    try {
+      const raw = msg.key.remoteJid || "";
+
+      // Already a real phone JID
+      if (raw.endsWith("@s.whatsapp.net")) return raw;
+      if (raw.endsWith("@g.us")) return raw;
+
+      if (raw.includes("@lid")) {
+        // ✅ PRIMARY FIX: senderPn is the real phone number Baileys puts in msg.key
+        const senderPn = msg.key.senderPn;
+        if (senderPn) {
+          const resolved = senderPn.includes("@")
+            ? senderPn
+            : `${senderPn}@s.whatsapp.net`;
+          console.log(`✅ senderPn resolved ${raw} → ${resolved}`);
+          return resolved;
+        }
+
+        const lidFull = raw;
+        const lidNum = raw.replace(/@.*$/, "");
+
+        // 1. Check contacts map (populated by contacts.upsert/update)
+        if (lidToJid.has(lidFull)) return lidToJid.get(lidFull);
+        if (lidToJid.has(lidNum)) return lidToJid.get(lidNum);
+
+        // 2. Check message's own participant field
+        const notifyPhone = msg.key.participant?.replace(/@.*$/, "");
+        if (notifyPhone && !notifyPhone.includes(lidNum)) {
+          const resolved = `${notifyPhone}@s.whatsapp.net`;
+          lidToJid.set(lidFull, resolved);
+          console.log(`✅ participant resolved ${lidNum} → ${resolved}`);
+          return resolved;
+        }
+
+        // 3. Try sock.onWhatsApp()
+        try {
+          const results = await sock.onWhatsApp(lidNum);
+          if (results && results[0]?.jid) {
+            const resolved = results[0].jid.includes("@")
+              ? results[0].jid
+              : `${results[0].jid}@s.whatsapp.net`;
+            lidToJid.set(lidFull, resolved);
+            lidToJid.set(lidNum, resolved);
+            console.log(`✅ onWhatsApp resolved ${lidNum} → ${resolved}`);
+            return resolved;
+          }
+        } catch (err) {
+          console.log(`⚠️ onWhatsApp failed for ${lidNum}:`, err.message);
+        }
+
+        // 4. Fallback — lid number with correct domain (won't deliver but won't crash)
+        console.log(`⚠️ Could not resolve @lid ${lidNum} — using fallback`);
+        return `${lidNum}@s.whatsapp.net`;
+      }
+
+      return raw;
+    } catch (err) {
+      console.error("resolveJid error:", err.message);
+      return msg.key.remoteJid || "";
+    }
+  }
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -204,15 +295,25 @@ async function connectToWhatsApp() {
       const errorMessage = lastDisconnect?.error?.message || '';
       console.log("❌ Connection closed. Reason:", reason, errorMessage);
 
+      const isPrekey = errorMessage.includes('prekey') ||
+        errorMessage.includes('pre_key') ||
+        errorMessage.includes('preKey');
+
       const isBadMac =
         reason === DisconnectReason.badSession ||
-        (errorMessage.includes('Bad MAC') ||
-        errorMessage.includes('bad-mac')) &&
-        reason !== 500;
+        ((errorMessage.includes('Bad MAC') || errorMessage.includes('bad-mac')) &&
+        reason !== 500);
 
       const isLoggedOut = reason === DisconnectReason.loggedOut;
       const isTimeout = reason === 408 || reason === 503 || reason === 428;
       const isStreamError = reason === 500;
+
+      if (isPrekey) {
+        console.log('🔑 Prekey bundle — reconnecting without wiping auth...');
+        reconnectAttempts = 0;
+        setTimeout(() => connectToWhatsApp(), 3000);
+        return;
+      }
 
       if (isLoggedOut) {
         console.log("Logged out by user — clearing auth, will need fresh QR scan...");
@@ -280,12 +381,13 @@ async function connectToWhatsApp() {
   const DEBOUNCE_MS = 6000;
 
   async function forwardToN8n(jid, senderNumber, text, originalMsg, extraPayload = {}) {
-    console.log('📤 Payload being sent:', JSON.stringify({ text, ...extraPayload }));
+    console.log('📤 Payload being sent:', JSON.stringify({ jid, from: senderNumber, text, ...extraPayload }));
     if (!N8N_WEBHOOK_URL) return;
     try {
       const payload = {
-        from: senderNumber,
+        from: String(senderNumber),
         jid: jid,
+        from_number: String(senderNumber),
         message: text,
         timestamp: originalMsg.messageTimestamp,
         messageId: originalMsg.key.id,
@@ -293,7 +395,7 @@ async function connectToWhatsApp() {
         ...extraPayload,
       };
       await axios.post(N8N_WEBHOOK_URL, payload);
-      console.log(`✅ Forwarded to n8n [${payload.messageType}]: ${text}`);
+      console.log(`✅ Forwarded to n8n [${payload.messageType}]: from=${senderNumber} jid=${jid}`);
     } catch (err) {
       console.error("❌ Failed to forward to n8n:", err.message);
     }
@@ -312,8 +414,7 @@ async function connectToWhatsApp() {
         const now = Date.now();
         const ageMinutes = (now - msgTimestamp) / 1000 / 60;
 
-        const justReconnected = reconnectedAt && (now - reconnectedAt) < 120000;
-
+        const justReconnected = reconnectedAt && (now - reconnectedAt) < 600000;
         if (!justReconnected || ageMinutes > 30) {
           console.log(`⏭️  Skipping already-processed message ${messageId}`);
           continue;
@@ -325,16 +426,20 @@ async function connectToWhatsApp() {
         await markMessageProcessed(messageId);
       }
 
-      const rawFrom = msg.key.remoteJid;
-const from = rawFrom.includes("@lid")
-  ? rawFrom.replace("@lid", "@s.whatsapp.net")
-  : rawFrom;
-const senderNumber = from
-  .replace("@s.whatsapp.net", "")
-  .replace("@g.us", "");
-const isGroup = rawFrom.endsWith("@g.us");
+      const rawRemoteJid = msg.key.remoteJid || "";
+      const isGroup = rawRemoteJid.endsWith("@g.us");
 
       if (isGroup) continue;
+
+      // Log full key so we can see every available field for debugging
+      console.log(`🔍 Raw msg.key:`, JSON.stringify(msg.key));
+      console.log(`🔍 msg.verifiedBizName:`, msg.verifiedBizName);
+      console.log(`🔍 msg.pushName:`, msg.pushName);
+
+      const from = await resolveJid(msg);
+      const senderNumber = jidToNumber(from);
+
+      console.log(`📩 Resolved JID: ${from} | number: ${senderNumber}`);
 
       const messageType = getContentType(msg.message);
 
@@ -488,8 +593,9 @@ const isGroup = rawFrom.endsWith("@g.us");
 
       const timer = setTimeout(async () => {
         const payload = {
-          from: senderNumber,
+          from: String(senderNumber),
           jid: from,
+          from_number: String(senderNumber),
           message: text,
           timestamp: msg.messageTimestamp,
           messageId: msg.key.id,
@@ -564,7 +670,8 @@ app.post("/send", async (req, res) => {
     return res.status(503).json({ error: "WhatsApp not connected yet" });
   }
 
-  const { to, message, mentions, imageUrl } = req.body;
+  const { to: toRaw, message, mentions, imageUrl } = req.body;
+  const to = String(toRaw);
 
   if (!to || !message) {
     return res
@@ -573,11 +680,15 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    const jid = to.includes("@g.us") ? to
-      : to.includes("@lid") ? to.replace("@lid", "@s.whatsapp.net")
-      : to.includes("@") ? to
-      : `${to}@s.whatsapp.net`;
+    let jid;
+    if (to.endsWith("@g.us")) {
+      jid = to;
+    } else {
+      const bare = to.replace(/@.*$/, "").replace(/\D/g, "");
+      jid = `${bare}@s.whatsapp.net`;
+    }
 
+    console.log(`📤 Sending message to ${jid}: ${message}`);
     await sock.sendPresenceUpdate("paused", jid);
 
     let messageOptions;
@@ -595,7 +706,7 @@ app.post("/send", async (req, res) => {
     }
 
     await sock.sendMessage(jid, messageOptions);
-    console.log(`📤 Sent to ${to}: ${message}`);
+    console.log(`✅ Sent to ${jid}: ${message}`);
     releaseLeadLock(to);
     res.json({ success: true });
   } catch (err) {
