@@ -6,7 +6,6 @@ const {
   getContentType,
   downloadMediaMessage,
   useMultiFileAuthState,
-  makeInMemoryStore,
 } = require("@whiskeysockets/baileys");
 
 const express = require("express");
@@ -39,8 +38,8 @@ let reconnectAttempts = 0;
 let reconnectedAt = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
-// ─── IN-MEMORY STORE — resolves @lid to real phone numbers ───────────────────
-const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
+// ─── LID → PHONE MAP ─────────────────────────────────────────────────────────
+const lidToJid = new Map();
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── JID HELPER ──────────────────────────────────────────────────────────────
@@ -194,10 +193,18 @@ async function connectToWhatsApp() {
     retryRequestDelayMs: 2000,
   });
 
-  // Bind store to socket events so it tracks contacts and resolves @lid
-  store.bind(sock.ev);
+  // Build lid → real JID map from contact updates
+  sock.ev.on("contacts.upsert", (contacts) => {
+    for (const contact of contacts) {
+      if (contact.lid && contact.id?.endsWith("@s.whatsapp.net")) {
+        lidToJid.set(contact.lid, contact.id);
+        lidToJid.set(contact.lid.replace(/@.*$/, ""), contact.id);
+        console.log(`📇 Mapped lid ${contact.lid} → ${contact.id}`);
+      }
+    }
+  });
 
-  // ── Async JID resolver ──
+  // ── Async JID resolver — map first, then onWhatsApp(), then fallback ──
   async function resolveJid(msg) {
     try {
       const raw = msg.key.remoteJid || "";
@@ -208,30 +215,29 @@ async function connectToWhatsApp() {
       if (raw.includes("@lid")) {
         const lidNumber = raw.replace(/@.*$/, "");
 
-        // 1. Try store contacts first
-        const contacts = store.contacts || {};
-        for (const [contactJid, contact] of Object.entries(contacts)) {
-          if (
-            contactJid.endsWith("@s.whatsapp.net") &&
-            (contact.lid === raw || contact.lid === lidNumber)
-          ) {
-            console.log(`✅ Store resolved @lid ${lidNumber} → ${contactJid}`);
-            return contactJid;
-          }
+        // 1. Check our lid map
+        if (lidToJid.has(raw)) {
+          console.log(`✅ Map resolved ${raw} → ${lidToJid.get(raw)}`);
+          return lidToJid.get(raw);
+        }
+        if (lidToJid.has(lidNumber)) {
+          console.log(`✅ Map resolved ${lidNumber} → ${lidToJid.get(lidNumber)}`);
+          return lidToJid.get(lidNumber);
         }
 
         // 2. Try sock.onWhatsApp()
         try {
           const results = await sock.onWhatsApp(lidNumber);
           if (results && results[0]?.jid) {
-            console.log(`✅ onWhatsApp resolved @lid ${lidNumber} → ${results[0].jid}`);
+            lidToJid.set(raw, results[0].jid);
+            lidToJid.set(lidNumber, results[0].jid);
+            console.log(`✅ onWhatsApp resolved ${lidNumber} → ${results[0].jid}`);
             return results[0].jid;
           }
         } catch (err) {
-          console.log(`⚠️ onWhatsApp failed for @lid ${lidNumber}:`, err.message);
+          console.log(`⚠️ onWhatsApp failed for ${lidNumber}:`, err.message);
         }
 
-        // 3. Fallback
         console.log(`⚠️ Could not resolve @lid ${lidNumber} — using fallback`);
         return `${lidNumber}@s.whatsapp.net`;
       }
