@@ -6,6 +6,7 @@ const {
   getContentType,
   downloadMediaMessage,
   useMultiFileAuthState,
+  makeInMemoryStore,
 } = require("@whiskeysockets/baileys");
 
 const express = require("express");
@@ -38,15 +39,16 @@ let reconnectAttempts = 0;
 let reconnectedAt = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+// ─── IN-MEMORY STORE — resolves @lid to real phone numbers ───────────────────
+const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── JID HELPER ──────────────────────────────────────────────────────────────
-// Extract the plain phone number (digits only) from a JID
 function jidToNumber(jid) {
   return jid.replace(/@.*$/, "");
 }
-// resolveJid is defined inside connectToWhatsApp() so it can access sock
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Wipe stored auth (used when WhatsApp logs us out or session is bad)
 async function clearAuth() {
   try {
     const fs = require('fs');
@@ -60,7 +62,6 @@ async function clearAuth() {
   }
 }
 
-// Ensure the processed_messages table exists (for dedup)
 async function ensureProcessedTable() {
   try {
     await pool.query(`
@@ -79,7 +80,6 @@ async function ensureProcessedTable() {
   }
 }
 
-// Check if a message ID has already been processed
 async function isMessageProcessed(messageId) {
   try {
     const result = await pool.query(
@@ -93,7 +93,6 @@ async function isMessageProcessed(messageId) {
   }
 }
 
-// Mark a message ID as processed
 async function markMessageProcessed(messageId) {
   try {
     await pool.query(
@@ -195,7 +194,10 @@ async function connectToWhatsApp() {
     retryRequestDelayMs: 2000,
   });
 
-  // ── Async JID resolver — uses sock.onWhatsApp() to convert @lid to real number ──
+  // Bind store to socket events so it tracks contacts and resolves @lid
+  store.bind(sock.ev);
+
+  // ── Async JID resolver ──
   async function resolveJid(msg) {
     try {
       const raw = msg.key.remoteJid || "";
@@ -205,21 +207,38 @@ async function connectToWhatsApp() {
 
       if (raw.includes("@lid")) {
         const lidNumber = raw.replace(/@.*$/, "");
+
+        // 1. Try store contacts first
+        const contacts = store.contacts || {};
+        for (const [contactJid, contact] of Object.entries(contacts)) {
+          if (
+            contactJid.endsWith("@s.whatsapp.net") &&
+            (contact.lid === raw || contact.lid === lidNumber)
+          ) {
+            console.log(`✅ Store resolved @lid ${lidNumber} → ${contactJid}`);
+            return contactJid;
+          }
+        }
+
+        // 2. Try sock.onWhatsApp()
         try {
           const results = await sock.onWhatsApp(lidNumber);
           if (results && results[0]?.jid) {
-            console.log(`✅ Resolved @lid ${lidNumber} → ${results[0].jid}`);
+            console.log(`✅ onWhatsApp resolved @lid ${lidNumber} → ${results[0].jid}`);
             return results[0].jid;
           }
         } catch (err) {
-          console.log(`⚠️ Could not resolve @lid ${lidNumber}:`, err.message);
+          console.log(`⚠️ onWhatsApp failed for @lid ${lidNumber}:`, err.message);
         }
-        // Fallback: replace domain (number may still be lid-encoded, but best effort)
-       return `${raw.replace(/@.*$/, "")}@s.whatsapp.net`;
+
+        // 3. Fallback
+        console.log(`⚠️ Could not resolve @lid ${lidNumber} — using fallback`);
+        return `${lidNumber}@s.whatsapp.net`;
       }
 
       return raw;
-    } catch {
+    } catch (err) {
+      console.error("resolveJid error:", err.message);
       return msg.key.remoteJid || "";
     }
   }
@@ -241,7 +260,6 @@ async function connectToWhatsApp() {
       const errorMessage = lastDisconnect?.error?.message || '';
       console.log("❌ Connection closed. Reason:", reason, errorMessage);
 
-      // ── FIX: declare isPrekey BEFORE using it ──
       const isPrekey = errorMessage.includes('prekey') ||
         errorMessage.includes('pre_key') ||
         errorMessage.includes('preKey');
@@ -373,13 +391,11 @@ async function connectToWhatsApp() {
         await markMessageProcessed(messageId);
       }
 
-      // ── FIX: use resolveJid helper to always get a real @s.whatsapp.net JID ──
       const rawRemoteJid = msg.key.remoteJid || "";
       const isGroup = rawRemoteJid.endsWith("@g.us");
 
       if (isGroup) continue;
 
-      // Resolve the true sender JID — async so it can call sock.onWhatsApp() for @lid
       const from = await resolveJid(msg);
       const senderNumber = jidToNumber(from);
 
@@ -623,12 +639,11 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    // ── FIX: always resolve to a clean @s.whatsapp.net JID, strip @lid ──
     let jid;
     if (to.endsWith("@g.us")) {
       jid = to;
     } else {
-      const bare = to.replace(/@.*$/, ""); // strip any domain
+      const bare = to.replace(/@.*$/, "");
       jid = `${bare}@s.whatsapp.net`;
     }
 
