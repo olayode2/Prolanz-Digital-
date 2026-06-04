@@ -173,7 +173,7 @@ function releaseLeadLock(to) {
 // ────────────────────────────────────────────────────────────────────────────
 
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('/var/data/auth');
+  const { state, saveCreds } = await useMultiFileAuthState('/var/data/auth_3')
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
