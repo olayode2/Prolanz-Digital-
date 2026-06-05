@@ -219,38 +219,41 @@ async function connectToWhatsApp() {
     try {
       const raw = msg.key.remoteJid || "";
 
-      // Already a real phone JID
+      // Already a real phone JID — nothing to do
       if (raw.endsWith("@s.whatsapp.net")) return raw;
       if (raw.endsWith("@g.us")) return raw;
 
       if (raw.includes("@lid")) {
-        // ✅ PRIMARY FIX: senderPn is the real phone number Baileys puts in msg.key
+        const lidFull = raw;
+        const lidNum = raw.replace(/@.*$/, "");
+
+        // 1. senderPn — Baileys puts real number here on most accounts
         const senderPn = msg.key.senderPn;
         if (senderPn) {
           const resolved = senderPn.includes("@")
             ? senderPn
             : `${senderPn}@s.whatsapp.net`;
-          console.log(`✅ senderPn resolved ${raw} → ${resolved}`);
+          lidToJid.set(lidFull, resolved);
+          lidToJid.set(lidNum, resolved);
+          console.log(`✅ senderPn resolved ${lidNum} → ${resolved}`);
           return resolved;
         }
 
-        const lidFull = raw;
-        const lidNum = raw.replace(/@.*$/, "");
-
-        // 1. Check contacts map (populated by contacts.upsert/update)
+        // 2. contacts map built from contacts.upsert / contacts.update
         if (lidToJid.has(lidFull)) return lidToJid.get(lidFull);
         if (lidToJid.has(lidNum)) return lidToJid.get(lidNum);
 
-        // 2. Check message's own participant field
-        const notifyPhone = msg.key.participant?.replace(/@.*$/, "");
-        if (notifyPhone && !notifyPhone.includes(lidNum)) {
-          const resolved = `${notifyPhone}@s.whatsapp.net`;
+        // 3. participant field
+        const participant = msg.key.participant?.replace(/@.*$/, "");
+        if (participant && participant !== lidNum) {
+          const resolved = `${participant}@s.whatsapp.net`;
           lidToJid.set(lidFull, resolved);
+          lidToJid.set(lidNum, resolved);
           console.log(`✅ participant resolved ${lidNum} → ${resolved}`);
           return resolved;
         }
 
-        // 3. Try sock.onWhatsApp()
+        // 4. sock.onWhatsApp()
         try {
           const results = await sock.onWhatsApp(lidNum);
           if (results && results[0]?.jid) {
@@ -266,8 +269,8 @@ async function connectToWhatsApp() {
           console.log(`⚠️ onWhatsApp failed for ${lidNum}:`, err.message);
         }
 
-        // 4. Fallback — lid number with correct domain (won't deliver but won't crash)
-        console.log(`⚠️ Could not resolve @lid ${lidNum} — using fallback`);
+        // 5. Hard fallback — still broken but won't crash
+        console.log(`⚠️ All resolution methods failed for @lid ${lidNum}`);
         return `${lidNum}@s.whatsapp.net`;
       }
 
