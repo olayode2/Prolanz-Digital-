@@ -326,9 +326,7 @@ async function connectToWhatsApp() {
       }
 
       const rawFrom = msg.key.remoteJid;
-const from = rawFrom.includes("@lid")
-  ? rawFrom.replace("@lid", "@s.whatsapp.net")
-  : rawFrom;
+const from = rawFrom;
 const senderNumber = from
   .replace("@s.whatsapp.net", "")
   .replace("@g.us", "");
@@ -573,10 +571,7 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    const jid = to.includes("@g.us") ? to
-      : to.includes("@lid") ? to.replace("@lid", "@s.whatsapp.net")
-      : to.includes("@") ? to
-      : `${to}@s.whatsapp.net`;
+    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
 
     await sock.sendPresenceUpdate("paused", jid);
 
