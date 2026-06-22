@@ -337,7 +337,6 @@ const senderNumber = from
   .replace("@g.us", "")
   .replace("@lid", "");
 const isGroup = rawFrom.endsWith("@g.us");
-const isGroup = rawFrom.endsWith("@g.us");
 
       if (isGroup) continue;
 
