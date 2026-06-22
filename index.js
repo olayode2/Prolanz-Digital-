@@ -326,10 +326,17 @@ async function connectToWhatsApp() {
       }
 
       const rawFrom = msg.key.remoteJid;
-const from = rawFrom;
+// When remoteJid is a LID, the real number is in these fallback fields
+const realJid =
+  (rawFrom.includes("@lid")
+    ? (msg.key.senderPn || msg.key.participantPn || msg.key.participant)
+    : rawFrom) || rawFrom;
+const from = realJid;
 const senderNumber = from
   .replace("@s.whatsapp.net", "")
-  .replace("@g.us", "");
+  .replace("@g.us", "")
+  .replace("@lid", "");
+const isGroup = rawFrom.endsWith("@g.us");
 const isGroup = rawFrom.endsWith("@g.us");
 
       if (isGroup) continue;
