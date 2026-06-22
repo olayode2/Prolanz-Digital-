@@ -577,9 +577,7 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    const jid = to.includes("@lid") ? to : 
-            to.includes("@") ? to : 
-            `${to}@s.whatsapp.net`;
+   const jid = to;
 
     await sock.sendPresenceUpdate("paused", jid);
 
