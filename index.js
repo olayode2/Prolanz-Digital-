@@ -579,8 +579,8 @@ app.post("/send", async (req, res) => {
   try {
    const jid = to;
 
-    await sock.sendPresenceUpdate("paused", jid);
-
+    await sock.sendPresenceUpdate("available", jid);
+await new Promise(resolve => setTimeout(resolve, 1500));
     let messageOptions;
     if (imageUrl) {
       messageOptions = {
